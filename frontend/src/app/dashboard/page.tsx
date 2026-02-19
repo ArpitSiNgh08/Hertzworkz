@@ -53,42 +53,49 @@ export default function DashboardPage() {
                     <NavItem icon={<Settings size={20} />} label="Settings" active={activeTab === 'settings'} onClick={() => setActiveTab('settings')} />
                 </nav>
 
-                <button
-                    onClick={handleLogout}
-                    className="flex items-center gap-3 px-3 py-2 text-muted-foreground hover:text-rose-600 transition-colors mt-auto font-medium shrink-0"
-                >
-                    <LogOut size={20} />
-                    <span>Logout</span>
-                </button>
+                <div className="mt-auto space-y-4 shrink-0">
+                    <div className="flex items-center justify-between px-3 py-2">
+                        <span className="text-sm font-medium text-muted-foreground">Appearance</span>
+                        <ThemeToggle />
+                    </div>
+                    <button
+                        onClick={handleLogout}
+                        className="flex items-center gap-3 px-3 py-2 text-muted-foreground hover:text-rose-600 transition-colors w-full font-medium"
+                    >
+                        <LogOut size={20} />
+                        <span>Logout</span>
+                    </button>
+                </div>
             </aside>
 
             {/* Main Content */}
             <main className="flex-1 flex flex-col h-screen overflow-hidden">
-                <header className="flex justify-between items-center p-8 border-b border-border bg-background/50 backdrop-blur-sm shrink-0">
-                    <div>
-                        <h1 className="text-3xl font-bold">{activeTab.charAt(0).toUpperCase() + activeTab.slice(1)}</h1>
-                        <p className="text-muted-foreground">
-                            {activeTab === 'dashboard' ? 'Here is what is happening today.' : `Welcome to your ${activeTab} space.`}
-                        </p>
-                    </div>
-                    <div className="flex items-center gap-2">
-                        <ThemeToggle />
-                        <button className="p-2 text-muted-foreground hover:text-foreground transition-colors">
-                            <Bell size={20} />
-                        </button>
-                        <div className="flex items-center gap-3 ml-2 pl-4 border-l border-border">
-                            <div className="text-right hidden sm:block">
-                                <p className="text-sm font-medium">{userEmail.split('@')[0]}</p>
-                                <p className="text-[10px] text-muted-foreground truncate max-w-[150px]">{userEmail}</p>
-                            </div>
-                            <div className="w-10 h-10 rounded-full bg-secondary flex items-center justify-center border border-border">
-                                <User size={20} />
+                {activeTab !== 'chat' && (
+                    <header className="flex justify-between items-center p-8 border-b border-border bg-background/50 backdrop-blur-sm shrink-0">
+                        <div>
+                            <h1 className="text-3xl font-bold">{activeTab.charAt(0).toUpperCase() + activeTab.slice(1)}</h1>
+                            <p className="text-muted-foreground">
+                                {activeTab === 'dashboard' ? 'Here is what is happening today.' : `Welcome to your ${activeTab} space.`}
+                            </p>
+                        </div>
+                        <div className="flex items-center gap-2">
+                            <button className="p-2 text-muted-foreground hover:text-foreground transition-colors">
+                                <Bell size={20} />
+                            </button>
+                            <div className="flex items-center gap-3 ml-2 pl-4 border-l border-border">
+                                <div className="text-right hidden sm:block">
+                                    <p className="text-sm font-medium">{userEmail.split('@')[0]}</p>
+                                    <p className="text-[10px] text-muted-foreground truncate max-w-[150px]">{userEmail}</p>
+                                </div>
+                                <div className="w-10 h-10 rounded-full bg-secondary flex items-center justify-center border border-border">
+                                    <User size={20} />
+                                </div>
                             </div>
                         </div>
-                    </div>
-                </header>
+                    </header>
+                )}
 
-                <div className="flex-1 overflow-y-auto p-8">
+                <div className={`flex-1 ${activeTab === 'chat' ? 'p-0' : 'overflow-y-auto p-8'}`}>
                     {activeTab === 'dashboard' && (
                         <>
                             <div className="grid grid-cols-1 md:grid-cols-3 gap-6">

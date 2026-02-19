@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef } from 'react';
 import { Send, User as UserIcon, Search, MessageSquare } from 'lucide-react';
+import { io, Socket } from 'socket.io-client';
 
 interface User {
     _id: string;
@@ -9,10 +10,11 @@ interface User {
 }
 
 interface Message {
-    senderId: string;
-    receiverId: string;
+    _id?: string;
+    sender: string;
+    receiver: string;
     text: string;
-    timestamp: number;
+    timestamp: string;
 }
 
 export function Chat() {
@@ -23,6 +25,7 @@ export function Chat() {
     const [currentUser, setCurrentUser] = useState<{ id: string; email: string } | null>(null);
     const [searchQuery, setSearchQuery] = useState('');
     const scrollRef = useRef<HTMLDivElement>(null);
+    const socketRef = useRef<Socket | null>(null);
 
     useEffect(() => {
         // Load current user from localStorage
@@ -46,19 +49,44 @@ export function Chat() {
     }, []);
 
     useEffect(() => {
-        if (selectedUser && currentUser) {
-            // Load messages from localStorage
-            const storedMessages = localStorage.getItem('chat_messages');
-            if (storedMessages) {
-                const allMessages: Message[] = JSON.parse(storedMessages);
-                const filteredMessages = allMessages.filter(
-                    m => (m.senderId === currentUser.id && m.receiverId === selectedUser._id) ||
-                        (m.senderId === selectedUser._id && m.receiverId === currentUser.id)
-                );
-                setMessages(filteredMessages);
-            } else {
-                setMessages([]);
+        // Connect to Socket.io
+        socketRef.current = io('http://localhost:5000');
+
+        socketRef.current.on('connect', () => {
+            console.log('Connected to socket server');
+            if (currentUser) {
+                socketRef.current?.emit('join', currentUser.id);
             }
+        });
+
+        socketRef.current.on('receive_message', (data: Message) => {
+            // Only update if the message is from the selected user OR we are the ones who sent it (to avoid double updates if handled locally)
+            // Actually, handleSendMessage already updates local state, so we check if the sender is the selectedUser
+            if (selectedUser && data.sender === selectedUser._id) {
+                setMessages(prev => [...prev, data]);
+            }
+        });
+
+        return () => {
+            socketRef.current?.disconnect();
+        };
+    }, [currentUser, selectedUser]); // Re-run if user changes to rejoin room or update receiver check
+
+    useEffect(() => {
+        const fetchMessages = async () => {
+            if (selectedUser && currentUser) {
+                try {
+                    const response = await fetch(`http://localhost:5000/api/chat/messages/${currentUser.id}/${selectedUser._id}`);
+                    const data = await response.json();
+                    setMessages(data);
+                } catch (error) {
+                    console.error('Error fetching messages:', error);
+                }
+            }
+        };
+
+        if (selectedUser && currentUser) {
+            fetchMessages();
         }
     }, [selectedUser, currentUser]);
 
@@ -69,38 +97,35 @@ export function Chat() {
         }
     }, [messages]);
 
-    const handleSendMessage = (e: React.FormEvent) => {
+    const handleSendMessage = async (e: React.FormEvent) => {
         e.preventDefault();
-        console.log('Attempting to send message...', { newMessage, selectedUser, currentUser });
 
-        if (!newMessage.trim() || !selectedUser || !currentUser) {
-            console.warn('Cannot send message: Missing data', {
-                hasMessage: !!newMessage.trim(),
-                hasSelectedUser: !!selectedUser,
-                hasCurrentUser: !!currentUser
-            });
-            return;
-        }
+        if (!newMessage.trim() || !selectedUser || !currentUser) return;
 
-        const msg: Message = {
-            senderId: currentUser.id,
-            receiverId: selectedUser._id,
-            text: newMessage.trim(),
-            timestamp: Date.now()
+        const msgData = {
+            sender: currentUser.id,
+            receiver: selectedUser._id,
+            text: newMessage.trim()
         };
 
         try {
-            // Save to localStorage
-            const storedMessages = localStorage.getItem('chat_messages');
-            const allMessages: Message[] = storedMessages ? JSON.parse(storedMessages) : [];
-            allMessages.push(msg);
-            localStorage.setItem('chat_messages', JSON.stringify(allMessages));
+            const response = await fetch('http://localhost:5000/api/chat/send', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(msgData)
+            });
 
-            setMessages(prev => [...prev, msg]);
-            setNewMessage('');
-            console.log('Message sent and saved.');
+            if (response.ok) {
+                const savedMsg = await response.json();
+
+                // Emit via socket for real-time delivery
+                socketRef.current?.emit('send_message', savedMsg);
+
+                setMessages(prev => [...prev, savedMsg]);
+                setNewMessage('');
+            }
         } catch (error) {
-            console.error('Error saving message:', error);
+            console.error('Error sending message:', error);
         }
     };
 
@@ -110,7 +135,7 @@ export function Chat() {
     );
 
     return (
-        <div className="flex h-[calc(100vh-160px)] bg-card rounded-xl border border-border shadow-sm overflow-hidden">
+        <div className="flex h-full w-full bg-card overflow-hidden">
             {/* User List */}
             <div className="w-80 border-r border-border flex flex-col bg-background/50">
                 <div className="p-4 border-b border-border">
@@ -180,10 +205,10 @@ export function Chat() {
 
                         <div ref={scrollRef} className="flex-1 overflow-y-auto p-4 space-y-4 bg-background/10">
                             {messages.length > 0 ? (
-                                messages.map((msg, idx) => {
-                                    const isMe = msg.senderId === currentUser?.id;
+                                messages.map((msg) => {
+                                    const isMe = msg.sender === currentUser?.id;
                                     return (
-                                        <div key={idx} className={`flex ${isMe ? 'justify-end' : 'justify-start'}`}>
+                                        <div key={msg._id} className={`flex ${isMe ? 'justify-end' : 'justify-start'}`}>
                                             <div className={`max-w-[70%] p-3 rounded-2xl ${isMe
                                                 ? 'bg-rose-600 text-white rounded-tr-none'
                                                 : 'bg-secondary text-foreground rounded-tl-none border border-border'
