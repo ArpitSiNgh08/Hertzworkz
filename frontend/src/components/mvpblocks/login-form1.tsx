@@ -34,6 +34,7 @@ export default function LoginForm1() {
       if (response.ok) {
         setMessage({ type: 'success', text: 'Login successful! Redirecting...' });
         localStorage.setItem('token', data.token);
+        localStorage.setItem('user', JSON.stringify(data.user));
         setTimeout(() => {
           router.push('/dashboard');
         }, 1500);
