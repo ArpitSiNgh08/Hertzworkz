@@ -1,8 +1,9 @@
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
-import { Send, User as UserIcon, Search, MessageSquare } from 'lucide-react';
+import { Send, User as UserIcon, Search, MessageSquare, Phone, PhoneOff, Check, X } from 'lucide-react';
 import { io, Socket } from 'socket.io-client';
+import { IncomingCallToast } from './IncomingCallToast';
 
 interface User {
     _id: string;
@@ -24,6 +25,8 @@ export function Chat() {
     const [newMessage, setNewMessage] = useState('');
     const [currentUser, setCurrentUser] = useState<{ id: string; email: string } | null>(null);
     const [searchQuery, setSearchQuery] = useState('');
+    const [incomingCall, setIncomingCall] = useState<{ callerId: string, callerEmail: string } | null>(null);
+    const [isCalling, setIsCalling] = useState(false);
     const scrollRef = useRef<HTMLDivElement>(null);
     const socketRef = useRef<Socket | null>(null);
 
@@ -65,6 +68,23 @@ export function Chat() {
             if (selectedUser && data.sender === selectedUser._id) {
                 setMessages(prev => [...prev, data]);
             }
+        });
+
+        socketRef.current.on('incoming_call', (data: { callerId: string, callerEmail: string }) => {
+            console.log('Incoming call from:', data.callerEmail);
+            setIncomingCall(data);
+        });
+
+        socketRef.current.on('call_accepted', (data: { receiverId: string }) => {
+            console.log('Call accepted by:', data.receiverId);
+            setIsCalling(false);
+            alert('Call accepted! (Signal logic handled)');
+        });
+
+        socketRef.current.on('call_declined', (data: { receiverId: string }) => {
+            console.log('Call declined by:', data.receiverId);
+            setIsCalling(false);
+            alert('Call declined');
         });
 
         return () => {
@@ -127,6 +147,37 @@ export function Chat() {
         } catch (error) {
             console.error('Error sending message:', error);
         }
+    };
+
+    const handleInitiateCall = () => {
+        if (!selectedUser || !currentUser) return;
+
+        setIsCalling(true);
+        socketRef.current?.emit('initiate_call', {
+            callerId: currentUser.id,
+            callerEmail: currentUser.email,
+            receiverId: selectedUser._id
+        });
+    };
+
+    const handleAcceptCall = () => {
+        if (!incomingCall || !currentUser) return;
+
+        socketRef.current?.emit('accept_call', {
+            callerId: incomingCall.callerId,
+            receiverId: currentUser.id
+        });
+        setIncomingCall(null);
+    };
+
+    const handleDeclineCall = () => {
+        if (!incomingCall || !currentUser) return;
+
+        socketRef.current?.emit('decline_call', {
+            callerId: incomingCall.callerId,
+            receiverId: currentUser.id
+        });
+        setIncomingCall(null);
     };
 
     const filteredUsers = users.filter(u =>
@@ -193,13 +244,24 @@ export function Chat() {
                 )}
                 {selectedUser ? (
                     <>
-                        <div className="p-4 border-b border-border flex items-center gap-3 bg-background/30">
-                            <div className="w-10 h-10 rounded-full bg-rose-100 dark:bg-rose-950/40 flex items-center justify-center text-rose-600">
-                                <UserIcon size={20} />
+                        <div className="p-4 border-b border-border flex items-center justify-between bg-background/30 px-6">
+                            <div className="flex items-center gap-3">
+                                <div className="w-10 h-10 rounded-full bg-rose-100 dark:bg-rose-950/40 flex items-center justify-center text-rose-600">
+                                    <UserIcon size={20} />
+                                </div>
+                                <div>
+                                    <h3 className="font-bold text-foreground">{selectedUser.email.split('@')[0]}</h3>
+                                    <p className="text-xs text-green-500">Online</p>
+                                </div>
                             </div>
-                            <div>
-                                <h3 className="font-bold text-foreground">{selectedUser.email.split('@')[0]}</h3>
-                                <p className="text-xs text-green-500">Online</p>
+                            <div className="flex items-center gap-2">
+                                <button
+                                    onClick={handleInitiateCall}
+                                    disabled={isCalling}
+                                    className={`p-2.5 rounded-full transition-all ${isCalling ? 'bg-rose-100 text-rose-400' : 'bg-rose-600 text-white hover:bg-rose-700 shadow-md shadow-rose-600/20'}`}
+                                >
+                                    <Phone size={18} />
+                                </button>
                             </div>
                         </div>
 
@@ -256,6 +318,31 @@ export function Chat() {
                     </div>
                 )}
             </div>
+
+            {incomingCall && (
+                <IncomingCallToast
+                    callerEmail={incomingCall.callerEmail}
+                    onJoin={handleAcceptCall}
+                    onDecline={handleDeclineCall}
+                />
+            )}
+
+            {isCalling && (
+                <div className="fixed inset-0 z-[100] bg-background/80 backdrop-blur-md flex flex-col items-center justify-center p-6 animate-in fade-in duration-500">
+                    <div className="w-24 h-24 rounded-full bg-rose-600 flex items-center justify-center text-white mb-6 animate-pulse shadow-2xl shadow-rose-600/40">
+                        <Phone size={40} className="animate-bounce" />
+                    </div>
+                    <h2 className="text-2xl font-bold mb-2">Calling {selectedUser?.email.split('@')[0]}...</h2>
+                    <p className="text-muted-foreground mb-10">Waiting for response</p>
+                    <button
+                        onClick={() => setIsCalling(false)}
+                        className="flex items-center gap-2 px-8 py-3 bg-red-600 text-white rounded-full hover:bg-red-700 transition-all font-bold shadow-lg"
+                    >
+                        <PhoneOff size={20} />
+                        End Call
+                    </button>
+                </div>
+            )}
         </div>
     );
 }

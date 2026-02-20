@@ -62,6 +62,33 @@ io.on('connection', (socket) => {
         io.to(data.receiver).emit('receive_message', data);
     });
 
+    // Call Signaling
+    socket.on('initiate_call', (data) => {
+        // data: { callerId, callerEmail, receiverId }
+        console.log(`Call initiated from ${data.callerId} to ${data.receiverId}`);
+        // Emit incoming call to the receiver's room
+        io.to(data.receiverId).emit('incoming_call', {
+            callerId: data.callerId,
+            callerEmail: data.callerEmail
+        });
+    });
+
+    socket.on('accept_call', (data) => {
+        // data: { callerId, receiverId }
+        console.log(`Call accepted by ${data.receiverId}`);
+        io.to(data.callerId).emit('call_accepted', {
+            receiverId: data.receiverId
+        });
+    });
+
+    socket.on('decline_call', (data) => {
+        // data: { callerId, receiverId }
+        console.log(`Call declined by ${data.receiverId}`);
+        io.to(data.callerId).emit('call_declined', {
+            receiverId: data.receiverId
+        });
+    });
+
     socket.on('disconnect', () => {
         console.log('User disconnected');
     });
