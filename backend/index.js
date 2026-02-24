@@ -89,8 +89,130 @@ io.on('connection', (socket) => {
         });
     });
 
+    // Mediasoup Signaling
+    const { getRouter, createWebRtcTransport, rooms } = require('./mediasoup/sfu');
+
+    socket.on('getRouterRtpCapabilities', async (data, callback) => {
+        try {
+            const roomId = data.roomId || 'default';
+            const router = await getRouter(roomId);
+            callback({ rtpCapabilities: router.rtpCapabilities });
+        } catch (error) {
+            console.error('getRouterRtpCapabilities error:', error);
+            callback({ error: error.message });
+        }
+    });
+
+    socket.on('createWebRtcTransport', async (data, callback) => {
+        try {
+            const roomId = data.roomId || 'default';
+            // Pass socket.id to associate the transport with this user
+            const transportParams = await createWebRtcTransport(roomId, socket.id);
+            callback(transportParams);
+        } catch (error) {
+            console.error('createWebRtcTransport error:', error);
+            callback({ error: error.message });
+        }
+    });
+
+    socket.on('connectWebRtcTransport', async (data, callback) => {
+        try {
+            const { roomId, transportId, dtlsParameters } = data;
+            const room = rooms.get(roomId || 'default');
+            const transport = room?.transports.get(transportId);
+
+            if (!transport) throw new Error(`Transport ${transportId} not found`);
+
+            await transport.connect({ dtlsParameters });
+            callback({ success: true });
+        } catch (error) {
+            console.error('connectWebRtcTransport error:', error);
+            callback({ error: error.message });
+        }
+    });
+
+    socket.on('produce', async (data, callback) => {
+        try {
+            const { roomId, transportId, kind, rtpParameters } = data;
+            const room = rooms.get(roomId || 'default');
+            const transport = room?.transports.get(transportId);
+
+            if (!transport) throw new Error(`Transport ${transportId} not found`);
+
+            const producer = await transport.produce({ kind, rtpParameters });
+
+            // Store producer with reference to socket id
+            producer.appData.socketId = socket.id;
+            room.producers.set(producer.id, producer);
+
+            callback({ id: producer.id });
+
+            // BROADCAST: Notify other clients in the room about this new producer
+            socket.to(roomId).emit('new_producer', {
+                producerId: producer.id,
+                socketId: socket.id
+            });
+
+        } catch (error) {
+            console.error('produce error:', error);
+            callback({ error: error.message });
+        }
+    });
+
+    socket.on('consume', async (data, callback) => {
+        try {
+            const { roomId, transportId, producerId, rtpCapabilities } = data;
+            const room = rooms.get(roomId || 'default');
+            const router = room.router;
+            const transport = room.transports.get(transportId);
+
+            if (!router.canConsume({ producerId, rtpCapabilities })) {
+                throw new Error('Cannot consume this producer');
+            }
+
+            const consumer = await transport.consume({
+                producerId,
+                rtpCapabilities,
+                paused: true, // Start paused, let client resume
+            });
+
+            // Store consumer
+            room.consumers.set(consumer.id, consumer);
+
+            callback({
+                id: consumer.id,
+                producerId,
+                kind: consumer.kind,
+                rtpParameters: consumer.rtpParameters,
+            });
+        } catch (error) {
+            console.error('consume error:', error);
+            callback({ error: error.message });
+        }
+    });
+
+    socket.on('resume_consumer', async (data, callback) => {
+        const { roomId, consumerId } = data;
+        const room = rooms.get(roomId || 'default');
+        const consumer = room.consumers.get(consumerId);
+        if (consumer) {
+            await consumer.resume();
+            callback({ success: true });
+        }
+    });
+
     socket.on('disconnect', () => {
-        console.log('User disconnected');
+        console.log('User disconnected:', socket.id);
+
+        // 1. Clean up Mediasoup resources (Transports, Producers, etc.)
+        const { closeTransportsBySocketId } = require('./mediasoup/sfu');
+        const roomId = closeTransportsBySocketId(socket.id);
+
+        // 2. Notify other participants in the room
+        if (roomId) {
+            console.log(`Notifying room ${roomId} about participant ${socket.id} leaving`);
+            socket.to(roomId).emit('participant_left', { socketId: socket.id });
+        }
     });
 });
 
