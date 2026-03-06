@@ -5,19 +5,26 @@ const Message = require('../models/Message');
 // Send a message
 router.post('/send', async (req, res) => {
     try {
-        const { sender, receiver, text } = req.body;
+        const { sender, receiver, groupId, text } = req.body;
 
-        if (!sender || !receiver || !text) {
+        if (!sender || (!receiver && !groupId) || !text) {
             return res.status(400).json({ message: 'Missing required fields' });
         }
 
         const newMessage = new Message({
             sender,
             receiver,
+            groupId,
             text
         });
 
         await newMessage.save();
+
+        // If it's a group message, populate the sender for the UI
+        if (groupId) {
+            await newMessage.populate('sender', 'email _id');
+        }
+
         res.status(201).json(newMessage);
     } catch (error) {
         console.error('Error sending message:', error);

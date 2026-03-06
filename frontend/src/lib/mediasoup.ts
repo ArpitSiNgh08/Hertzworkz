@@ -116,6 +116,14 @@ export class MediasoupClient {
         return producer;
     }
 
+    async produceAudio(transport: any, stream: MediaStream) {
+        const audioTrack = stream.getAudioTracks()[0];
+        if (!audioTrack) throw new Error('No audio track found');
+
+        const producer = await transport.produce({ track: audioTrack });
+        return producer;
+    }
+
     async createRecvTransport() {
         if (!this.device) throw new Error('Device not initialized');
 
@@ -175,5 +183,21 @@ export class MediasoupClient {
         });
 
         return consumer;
+    }
+
+    async getProducers() {
+        return new Promise<any[]>((resolve, reject) => {
+            this.socket.emit('get_producers', { roomId: this.roomId }, (res: any) => {
+                if (res.error) reject(res.error);
+                else resolve(res);
+            });
+        });
+    }
+
+    close() {
+        this.device = null;
+        // In a real scenario, you'd also close transports and producers here
+        // but since we refresh/unmount, the garbage collector and 
+        // socket disconnect handle most of it.
     }
 }

@@ -48,18 +48,54 @@ app.use('/api/auth', authRoutes);
 const chatRoutes = require('./routes/chatRoutes');
 app.use('/api/chat', chatRoutes);
 
+// Group Routes
+const groupRoutes = require('./routes/groupRoutes');
+app.use('/api/groups', groupRoutes);
+
+const Group = require('./models/Group');
+
 // Socket.io Logic
 io.on('connection', (socket) => {
     console.log('A user connected:', socket.id);
 
-    socket.on('join', (userId) => {
+    socket.on('join', async (userId) => {
         socket.join(userId);
         console.log(`User ${userId} joined their room`);
+
+        // Also join all group rooms the user is a member of
+        try {
+            const groups = await Group.find({ members: userId });
+            groups.forEach(group => {
+                socket.join(group._id.toString());
+                console.log(`User ${userId} joined group room: ${group._id}`);
+            });
+        } catch (error) {
+            console.error('Error joining group rooms:', error);
+        }
+    });
+
+    socket.on('join_group', (groupId) => {
+        socket.join(groupId);
+        console.log(`Socket ${socket.id} joined group room: ${groupId}`);
+    });
+
+    socket.on('new_group', (data) => {
+        // data: { groupId, members }
+        data.members.forEach(memberId => {
+            io.to(memberId).emit('group_created', { groupId: data.groupId });
+        });
     });
 
     socket.on('send_message', (data) => {
-        // Broadcast to the specific receiver's room
-        io.to(data.receiver).emit('receive_message', data);
+        if (data.groupId) {
+            // Group message
+            console.log(`Group message from ${data.sender} to group ${data.groupId}`);
+            io.to(data.groupId).emit('receive_message', data);
+        } else if (data.receiver) {
+            // Individual message
+            console.log(`Direct message from ${data.sender} to ${data.receiver}`);
+            io.to(data.receiver).emit('receive_message', data);
+        }
     });
 
     // Call Signaling
@@ -73,11 +109,33 @@ io.on('connection', (socket) => {
         });
     });
 
+    socket.on('initiate_group_call', (data) => {
+        // data: { callerId, callerEmail, groupId, groupName }
+        console.log(`Group call initiated from ${data.callerId} in group ${data.groupId}`);
+        // Broadcast to the group room except the caller
+        socket.to(data.groupId).emit('incoming_group_call', {
+            callerId: data.callerId,
+            callerEmail: data.callerEmail,
+            groupId: data.groupId,
+            groupName: data.groupName
+        });
+    });
+
     socket.on('accept_call', (data) => {
         // data: { callerId, receiverId }
         console.log(`Call accepted by ${data.receiverId}`);
         io.to(data.callerId).emit('call_accepted', {
             receiverId: data.receiverId
+        });
+    });
+
+    socket.on('accept_group_call', (data) => {
+        // data: { userId, groupId }
+        console.log(`Group call accepted by ${data.userId} in group ${data.groupId}`);
+        // Notify others in the group that someone joined the call
+        // In SFU, 'new_producer' will eventually handle the stream notification
+        io.to(data.groupId).emit('group_participant_joined', {
+            userId: data.userId
         });
     });
 
@@ -87,6 +145,23 @@ io.on('connection', (socket) => {
         io.to(data.callerId).emit('call_declined', {
             receiverId: data.receiverId
         });
+    });
+
+    socket.on('end_call', (data) => {
+        // data: { toId, fromId, groupId }
+        console.log(`Call ended by ${data.fromId} in ${data.groupId ? 'group ' + data.groupId : 'direct call'}`);
+        if (data.groupId) {
+            // For group calls, notifying others that someone left
+            socket.to(data.groupId).emit('participant_left_call', {
+                fromId: data.fromId,
+                groupId: data.groupId
+            });
+        } else {
+            // For 1-on-1 calls, the whole call ends
+            io.to(data.toId).emit('call_ended', {
+                fromId: data.fromId
+            });
+        }
     });
 
     // Mediasoup Signaling
@@ -187,6 +262,26 @@ io.on('connection', (socket) => {
             });
         } catch (error) {
             console.error('consume error:', error);
+            callback({ error: error.message });
+        }
+    });
+
+    socket.on('get_producers', (data, callback) => {
+        try {
+            const { roomId } = data;
+            const room = rooms.get(roomId || 'default');
+            if (!room) return callback([]);
+
+            const producers = [];
+            for (const [id, producer] of room.producers) {
+                producers.push({
+                    producerId: id,
+                    socketId: producer.appData.socketId
+                });
+            }
+            callback(producers);
+        } catch (error) {
+            console.error('get_producers error:', error);
             callback({ error: error.message });
         }
     });
