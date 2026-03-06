@@ -124,7 +124,9 @@ export default function DashboardPage() {
                         </>
                     )}
 
-                    {activeTab === 'chat' && <Chat />}
+                    <div className={activeTab === 'chat' ? 'h-full' : 'hidden'}>
+                        <Chat />
+                    </div>
 
                     {(activeTab === 'profile' || activeTab === 'settings') && (
                         <div className="flex flex-col items-center justify-center h-full text-muted-foreground">

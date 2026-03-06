@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { Phone, PhoneOff, Video, VideoOff, Mic, MicOff, User } from 'lucide-react';
 
 export type CallStatus = 'dialing' | 'ringing' | 'connected' | 'ended' | 'declined';
@@ -26,6 +27,11 @@ export function CallInterface({
     const [isVideoOff, setIsVideoOff] = useState(false);
     const localVideoRef = useRef<HTMLVideoElement>(null);
     const [localStream, setLocalStream] = useState<MediaStream | null>(null);
+    const [mounted, setMounted] = useState(false);
+
+    useEffect(() => {
+        setMounted(true);
+    }, []);
 
     useEffect(() => {
         if (status === 'connected' || status === 'dialing') {
@@ -61,10 +67,43 @@ export function CallInterface({
     }, [isVideoOff, localStream]);
 
     if (status === 'ended' || status === 'declined') return null;
+    if (!mounted) return null;
 
     const displayName = remoteUserEmail.split('@')[0];
 
-    return (
+    // For incoming calls, show a small toast-style popup
+    if (status === 'ringing') {
+        return createPortal((
+            <div className="fixed top-6 right-6 z-[300] w-80 bg-zinc-900 border border-white/10 rounded-2xl shadow-2xl p-4 flex flex-col gap-4 animate-in slide-in-from-right-12 duration-500 font-sans">
+                <div className="flex items-center gap-4">
+                    <div className="relative w-12 h-12 rounded-full bg-rose-500/10 flex items-center justify-center text-rose-500">
+                        <User size={24} />
+                        <div className="absolute -inset-1 border-2 border-rose-500/20 rounded-full animate-ping" />
+                    </div>
+                    <div>
+                        <h3 className="text-white font-bold capitalize truncate max-w-[180px]">{displayName}</h3>
+                        <p className="text-rose-400 text-sm animate-pulse">Incoming Call...</p>
+                    </div>
+                </div>
+                <div className="flex justify-end gap-3 mt-2">
+                    <button
+                        onClick={onDecline}
+                        className="px-4 py-2 rounded-xl bg-red-500/10 text-red-500 hover:bg-red-500 hover:text-white font-medium text-sm transition-all"
+                    >
+                        Decline
+                    </button>
+                    <button
+                        onClick={onAccept}
+                        className="px-4 py-2 rounded-xl flex items-center gap-2 bg-emerald-500 hover:bg-emerald-600 text-white font-medium text-sm transition-colors shadow-lg shadow-emerald-500/20"
+                    >
+                        <Phone size={14} /> Accept
+                    </button>
+                </div>
+            </div>
+        ), document.body);
+    }
+
+    return createPortal((
         <div className="fixed inset-0 z-[200] bg-zinc-950 flex flex-col items-center justify-center overflow-hidden font-sans">
             {/* Background blur/gradient */}
             <div className="absolute inset-0 bg-gradient-to-b from-rose-900/20 via-zinc-950 to-zinc-950" />
@@ -73,9 +112,9 @@ export function CallInterface({
             <div className="relative w-full h-full flex items-center justify-center p-4">
                 {status === 'connected' && remoteStreams.length > 0 ? (
                     <div className={`grid gap-4 w-full h-full max-w-7xl mx-auto transition-all duration-500 ${remoteStreams.length === 1 ? 'grid-cols-1' :
-                            remoteStreams.length === 2 ? 'grid-cols-1 md:grid-cols-2' :
-                                remoteStreams.length <= 4 ? 'grid-cols-2' :
-                                    'grid-cols-2 lg:grid-cols-3'
+                        remoteStreams.length === 2 ? 'grid-cols-1 md:grid-cols-2' :
+                            remoteStreams.length <= 4 ? 'grid-cols-2' :
+                                'grid-cols-2 lg:grid-cols-3'
                         }`}>
                         {remoteStreams.map((item) => (
                             <div key={item.socketId} className="relative w-full h-full min-h-[200px] bg-zinc-900 rounded-3xl overflow-hidden border border-white/5 shadow-2xl group transition-all hover:scale-[1.02]">
@@ -98,10 +137,10 @@ export function CallInterface({
                 ) : (
                     <div className="flex flex-col items-center gap-6 animate-in fade-in zoom-in duration-500">
                         <div className="relative">
-                            <div className={`w-32 h-32 rounded-full bg-rose-500/10 flex items-center justify-center text-rose-500 border-2 border-rose-500/20 shadow-2xl shadow-rose-500/10 ${status === 'ringing' || status === 'dialing' ? 'animate-pulse' : ''}`}>
+                            <div className={`w-32 h-32 rounded-full bg-rose-500/10 flex items-center justify-center text-rose-500 border-2 border-rose-500/20 shadow-2xl shadow-rose-500/10 ${status === 'dialing' ? 'animate-pulse' : ''}`}>
                                 <User size={64} />
                             </div>
-                            {(status === 'ringing' || status === 'dialing') && (
+                            {status === 'dialing' && (
                                 <>
                                     <div className="absolute -inset-4 border-2 border-rose-500/20 rounded-full animate-ping [animation-duration:3s]" />
                                     <div className="absolute -inset-8 border-2 border-rose-500/10 rounded-full animate-ping [animation-duration:4s]" />
@@ -111,7 +150,7 @@ export function CallInterface({
                         <div className="text-center z-10">
                             <h2 className="text-4xl font-bold text-white tracking-tight mb-2 capitalize">{displayName}</h2>
                             <p className="text-rose-400 text-lg font-medium tracking-wide">
-                                {status === 'dialing' ? 'Calling...' : status === 'ringing' ? 'Incoming Call' : 'Connecting...'}
+                                {status === 'dialing' ? 'Calling...' : 'Connecting...'}
                             </p>
                         </div>
                     </div>
@@ -141,22 +180,7 @@ export function CallInterface({
 
             {/* Controls */}
             <div className="absolute bottom-12 z-50 flex items-center gap-6 px-8 py-4 bg-zinc-900/40 backdrop-blur-2xl rounded-3xl border border-white/5 shadow-2xl animate-in slide-in-from-bottom-12 duration-700">
-                {status === 'ringing' ? (
-                    <>
-                        <button
-                            onClick={onDecline}
-                            className="w-16 h-16 rounded-full bg-rose-500 hover:bg-rose-600 flex items-center justify-center text-white transition-all transform hover:scale-110 active:scale-95 shadow-xl shadow-rose-500/20"
-                        >
-                            <PhoneOff size={28} />
-                        </button>
-                        <button
-                            onClick={onAccept}
-                            className="w-16 h-16 rounded-full bg-emerald-500 hover:bg-emerald-600 flex items-center justify-center text-white transition-all transform hover:scale-110 active:scale-95 shadow-xl shadow-emerald-500/20"
-                        >
-                            <Phone size={28} />
-                        </button>
-                    </>
-                ) : (
+                {status === 'dialing' || status === 'connected' ? (
                     <>
                         <button
                             onClick={() => setIsMuted(!isMuted)}
@@ -179,8 +203,8 @@ export function CallInterface({
                             {isVideoOff ? <VideoOff size={24} /> : <Video size={24} />}
                         </button>
                     </>
-                )}
+                ) : null}
             </div>
         </div>
-    );
+    ), document.body);
 }
