@@ -106,7 +106,7 @@ export function Chat() {
         if (!currentUser) return;
 
         // Connect to Socket.io
-        socketRef.current = io('http://localhost:5000');
+        socketRef.current = io(process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:5000');
 
         socketRef.current.on('connect', () => {
             console.log('Connected to socket server');
