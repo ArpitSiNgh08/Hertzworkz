@@ -87,6 +87,7 @@ const closeTransportsBySocketId = (socketId) => {
                     }
                 }
 
+                
                 // Notify other clients in the room would happen in index.js
                 return roomId;
             }

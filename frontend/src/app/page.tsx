@@ -6,6 +6,7 @@ export default function Home() {
     <div className="relative flex min-h-screen items-center justify-center bg-background font-sans transition-colors duration-300">
       <ThemeToggle className="absolute top-4 right-4" />
       <LoginForm1 />
+      
     </div>
   );
 }
