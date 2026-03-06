@@ -53,6 +53,7 @@ export function Chat() {
     const [callStatus, setCallStatus] = useState<CallStatus | 'idle'>('idle');
     const [callRemoteEmail, setCallRemoteEmail] = useState('');
     const [remoteStreams, setRemoteStreams] = useState<{ socketId: string, stream: MediaStream }[]>([]);
+    const [localStream, setLocalStream] = useState<MediaStream | null>(null);
     const [showCreateGroup, setShowCreateGroup] = useState(false);
     const [newGroupName, setNewGroupName] = useState('');
     const [selectedMembers, setSelectedMembers] = useState<string[]>([]);
@@ -61,6 +62,18 @@ export function Chat() {
     const socketRef = useRef<Socket | null>(null);
     const msClientRef = useRef<MediasoupClient | null>(null);
     const recvTransportRef = useRef<any>(null);
+    const creatingRecvTransportRef = useRef<Promise<any> | null>(null);
+
+    const getOrCreateRecvTransport = async (client: MediasoupClient) => {
+        if (recvTransportRef.current) return recvTransportRef.current;
+        if (creatingRecvTransportRef.current) return await creatingRecvTransportRef.current;
+
+        creatingRecvTransportRef.current = client.createRecvTransport();
+        const transport = await creatingRecvTransportRef.current;
+        recvTransportRef.current = transport;
+        creatingRecvTransportRef.current = null;
+        return transport;
+    };
 
     useEffect(() => {
         // Load current user from localStorage
@@ -139,11 +152,14 @@ export function Chat() {
         });
 
         socketRef.current.on('call_accepted', async (data: { receiverId: string }) => {
-            setCallStatus('connected');
-
-            // The room ID is usually the caller's ID in 1-on-1 calls
-            // If we are the caller, we already started the SFU session
-            // If we are the receiver and this is triggered, it's usually via accept_call which already calls startSfuSession
+            // Only the actual Caller should react to this event to spawn the Caller's SFU perspective
+            // We know we are the caller if the emitted receiverId matches the user we are currently trying to call
+            if (selectedUserRef.current?._id === data.receiverId) {
+                setCallStatus('connected');
+                if (currentUser?.id) {
+                    startSfuSession(currentUser.id);
+                }
+            }
         });
 
         socketRef.current.on('group_participant_joined', (data: { userId: string }) => {
@@ -163,10 +179,15 @@ export function Chat() {
             setIncomingCall(null);
             setIncomingGroupCall(null);
             setRemoteStreams([]);
+            setLocalStream(prev => {
+                if (prev) prev.getTracks().forEach(t => t.stop());
+                return null;
+            });
             if (msClientRef.current) {
                 msClientRef.current.close();
                 msClientRef.current = null;
             }
+            recvTransportRef.current = null;
         });
 
         socketRef.current.on('participant_left_call', (data: { fromId: string, groupId: string }) => {
@@ -181,10 +202,8 @@ export function Chat() {
             if (data.socketId === socketRef.current.id) return;
 
             try {
-                if (!recvTransportRef.current) {
-                    recvTransportRef.current = await msClientRef.current.createRecvTransport();
-                }
-                const consumer = await msClientRef.current.consume(recvTransportRef.current, data.producerId);
+                const recvTransport = await getOrCreateRecvTransport(msClientRef.current);
+                const consumer = await msClientRef.current.consume(recvTransport, data.producerId);
 
                 setRemoteStreams(prev => {
                     const existingIndex = prev.findIndex(s => s.socketId === data.socketId);
@@ -362,6 +381,9 @@ export function Chat() {
     const startSfuSession = async (roomId: string) => {
         if (!currentUser || !socketRef.current) return;
 
+        // Clean any leftover stale transport from a previous disconnected call
+        recvTransportRef.current = null;
+
         // Ensure status reflects connected
         setCallStatus('connected');
 
@@ -371,6 +393,12 @@ export function Chat() {
             console.log(`SFU is ready for room: ${roomId}`);
             try {
                 const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+
+                // Disable tracks initially so they start muted
+                stream.getVideoTracks().forEach(track => track.enabled = false);
+                stream.getAudioTracks().forEach(track => track.enabled = false);
+                setLocalStream(stream);
+
                 const sendTransport = await msClientRef.current.createSendTransport();
                 await msClientRef.current.produceVideo(sendTransport, stream);
                 await msClientRef.current.produceAudio(sendTransport, stream);
@@ -379,16 +407,14 @@ export function Chat() {
                 const producers = await msClientRef.current.getProducers();
                 console.log('Existing producers:', producers);
 
-                if (!recvTransportRef.current) {
-                    recvTransportRef.current = await msClientRef.current.createRecvTransport();
-                }
+                const recvTransport = await getOrCreateRecvTransport(msClientRef.current);
 
                 for (const p of producers) {
                     // Don't consume ourselves
                     if (p.socketId === socketRef.current.id) continue;
 
                     try {
-                        const consumer = await msClientRef.current.consume(recvTransportRef.current, p.producerId);
+                        const consumer = await msClientRef.current.consume(recvTransport, p.producerId);
                         setRemoteStreams(prev => {
                             const existingIndex = prev.findIndex(s => s.socketId === p.socketId);
                             if (existingIndex !== -1) {
@@ -457,10 +483,15 @@ export function Chat() {
         setIncomingCall(null);
         setIncomingGroupCall(null);
         setRemoteStreams([]);
+        setLocalStream(prev => {
+            if (prev) prev.getTracks().forEach(t => t.stop());
+            return null;
+        });
         if (msClientRef.current) {
             msClientRef.current.close();
             msClientRef.current = null;
         }
+        recvTransportRef.current = null;
     };
 
     const filteredUsers = users.filter(u =>
@@ -709,6 +740,7 @@ export function Chat() {
                     status={callStatus}
                     remoteUserEmail={callRemoteEmail}
                     remoteStreams={remoteStreams}
+                    localStream={localStream}
                     onAccept={handleAcceptCall}
                     onDecline={handleDeclineCall}
                     onEnd={handleEndCall}

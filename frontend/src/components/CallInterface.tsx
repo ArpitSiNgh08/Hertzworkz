@@ -10,6 +10,7 @@ interface CallInterfaceProps {
     status: CallStatus;
     remoteUserEmail: string;
     remoteStreams: { socketId: string, stream: MediaStream }[];
+    localStream: MediaStream | null;
     onAccept: () => void;
     onDecline: () => void;
     onEnd: () => void;
@@ -19,40 +20,26 @@ export function CallInterface({
     status,
     remoteUserEmail,
     remoteStreams,
+    localStream,
     onAccept,
     onDecline,
     onEnd
 }: CallInterfaceProps) {
-    const [isMuted, setIsMuted] = useState(false);
-    const [isVideoOff, setIsVideoOff] = useState(false);
+    const [isMuted, setIsMuted] = useState(true);
+    const [isVideoOff, setIsVideoOff] = useState(true);
     const localVideoRef = useRef<HTMLVideoElement>(null);
-    const [localStream, setLocalStream] = useState<MediaStream | null>(null);
     const [mounted, setMounted] = useState(false);
 
     useEffect(() => {
         setMounted(true);
     }, []);
 
+    // Sync stream to video element whenever stream or video ref becomes available
     useEffect(() => {
-        if (status === 'connected' || status === 'dialing') {
-            const startLocalStream = async () => {
-                try {
-                    const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-                    setLocalStream(stream);
-                    if (localVideoRef.current) {
-                        localVideoRef.current.srcObject = stream;
-                    }
-                } catch (err) {
-                    console.error("Error accessing media devices:", err);
-                }
-            };
-            startLocalStream();
+        if (localVideoRef.current && localStream) {
+            localVideoRef.current.srcObject = localStream;
         }
-
-        return () => {
-            localStream?.getTracks().forEach(track => track.stop());
-        };
-    }, [status]);
+    }, [localStream, status]);
 
     useEffect(() => {
         if (localStream) {

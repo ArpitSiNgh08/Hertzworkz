@@ -127,9 +127,14 @@ io.on('connection', (socket) => {
     socket.on('accept_call', (data) => {
         // data: { callerId, receiverId }
         console.log(`Call accepted by ${data.receiverId}`);
+
+        // Emit to the caller BEFORE the receiver joins the room
         io.to(data.callerId).emit('call_accepted', {
             receiverId: data.receiverId
         });
+
+        // Ensure the receiver joins the caller's room for SFU signaling
+        socket.join(data.callerId);
     });
 
     socket.on('accept_group_call', (data) => {
@@ -243,6 +248,8 @@ io.on('connection', (socket) => {
             const room = rooms.get(roomId || 'default');
             const router = room.router;
             const transport = room.transports.get(transportId);
+
+            if (!transport) throw new Error(`Transport ${transportId} not found`);
 
             if (!router.canConsume({ producerId, rtpCapabilities })) {
                 throw new Error('Cannot consume this producer');

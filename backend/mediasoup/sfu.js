@@ -24,23 +24,37 @@ const createWorker = async () => {
 // Start worker
 createWorker();
 
+const creatingRouters = new Map(); // roomId => promise
+
 const getRouter = async (roomId) => {
     if (rooms.has(roomId)) {
         return rooms.get(roomId).router;
     }
 
-    const router = await worker.createRouter({
-        mediaCodecs: config.mediasoup.router.mediaCodecs,
-    });
+    if (creatingRouters.has(roomId)) {
+        return await creatingRouters.get(roomId);
+    }
 
-    rooms.set(roomId, {
-        router,
-        transports: new Map(), // transportId => transport
-        producers: new Map(),  // producerId => producer
-        consumers: new Map(),  // consumerId => consumer
-    });
+    const promise = (async () => {
+        const router = await worker.createRouter({
+            mediaCodecs: config.mediasoup.router.mediaCodecs,
+        });
 
-    console.log(`Router created for room: ${roomId}`);
+        rooms.set(roomId, {
+            router,
+            transports: new Map(), // transportId => transport
+            producers: new Map(),  // producerId => producer
+            consumers: new Map(),  // consumerId => consumer
+        });
+
+        console.log(`Router created for room: ${roomId}`);
+        return router;
+    })();
+
+    creatingRouters.set(roomId, promise);
+    const router = await promise;
+    creatingRouters.delete(roomId);
+
     return router;
 };
 
@@ -87,7 +101,7 @@ const closeTransportsBySocketId = (socketId) => {
                     }
                 }
 
-                
+
                 // Notify other clients in the room would happen in index.js
                 return roomId;
             }
