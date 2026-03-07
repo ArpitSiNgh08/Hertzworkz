@@ -27,6 +27,8 @@ interface Message {
     timestamp: string;
 }
 
+const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:5000';
+
 export function Chat() {
     const [users, setUsers] = useState<User[]>([]);
     const [groups, setGroups] = useState<Group[]>([]);
@@ -86,7 +88,7 @@ export function Chat() {
         // Fetch users from backend
         const fetchUsers = async () => {
             try {
-                const response = await fetch('http://localhost:5000/api/auth/users');
+                const response = await fetch(`${BACKEND_URL}/api/auth/users`);
                 const data = await response.json();
                 setUsers(data);
             } catch (error) {
@@ -101,7 +103,7 @@ export function Chat() {
         const fetchGroups = async () => {
             if (currentUser) {
                 try {
-                    const response = await fetch(`http://localhost:5000/api/groups/user/${currentUser.id}`);
+                    const response = await fetch(`${BACKEND_URL}/api/groups/user/${currentUser.id}`);
                     const data = await response.json();
                     setGroups(data);
                 } catch (error) {
@@ -119,7 +121,7 @@ export function Chat() {
         if (!currentUser) return;
 
         // Connect to Socket.io
-        socketRef.current = io(process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:5000');
+        socketRef.current = io(BACKEND_URL);
 
         socketRef.current.on('connect', () => {
             console.log('Connected to socket server');
@@ -232,7 +234,7 @@ export function Chat() {
 
             // Re-fetch groups to show the new group in the list
             try {
-                const response = await fetch(`http://localhost:5000/api/groups/user/${currentUser.id}`);
+                const response = await fetch(`${BACKEND_URL}/api/groups/user/${currentUser.id}`);
                 const groupsData = await response.json();
                 setGroups(groupsData);
             } catch (error) {
@@ -251,9 +253,9 @@ export function Chat() {
                 try {
                     let url = '';
                     if (selectedUser) {
-                        url = `http://localhost:5000/api/chat/messages/${currentUser.id}/${selectedUser._id}`;
+                        url = `${BACKEND_URL}/api/chat/messages/${currentUser.id}/${selectedUser._id}`;
                     } else if (selectedGroup) {
-                        url = `http://localhost:5000/api/groups/${selectedGroup._id}/messages`;
+                        url = `${BACKEND_URL}/api/groups/${selectedGroup._id}/messages`;
                     } else {
                         return;
                     }
@@ -292,9 +294,9 @@ export function Chat() {
         }
 
         try {
-            const endpoint = selectedUser ? 'http://localhost:5000/api/chat/send' : 'http://localhost:5000/api/chat/send';
+            const endpoint = `${BACKEND_URL}/api/chat/send`;
             // We'll use the same send endpoint if it supports groupId, or handle it here
-            const response = await fetch('http://localhost:5000/api/chat/send', {
+            const response = await fetch(endpoint, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(msgData)
@@ -315,7 +317,7 @@ export function Chat() {
         if (!newGroupName.trim() || selectedMembers.length === 0 || !currentUser) return;
 
         try {
-            const response = await fetch('http://localhost:5000/api/groups/create', {
+            const response = await fetch(`${BACKEND_URL}/api/groups/create`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
