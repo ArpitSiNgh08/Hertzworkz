@@ -200,6 +200,8 @@ export function Chat() {
 
         socketRef.current.on('new_producer', async (data: { producerId: string, socketId: string }) => {
             if (!msClientRef.current || !socketRef.current) return;
+            // Ensure device is initialized before handling new producers
+            if (!msClientRef.current.isLoaded()) return;
             // Ignore ourselves
             if (data.socketId === socketRef.current.id) return;
 
