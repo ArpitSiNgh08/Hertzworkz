@@ -61,9 +61,14 @@ const Group = require('./models/Group');
 io.on('connection', (socket) => {
     console.log('A user connected:', socket.id);
 
-    socket.on('join', async (userId) => {
+    socket.on('join', async (data) => {
+        const userId = typeof data === 'object' ? data.userId : data;
+        const email = typeof data === 'object' ? data.email : null;
+        
         socket.join(userId);
-        console.log(`User ${userId} joined their room`);
+        if (email) socket.email = email;
+        
+        console.log(`User ${userId} joined their room ${email ? '(' + email + ')' : ''}`);
 
         // Also join all group rooms the user is a member of
         try {
@@ -226,6 +231,7 @@ io.on('connection', (socket) => {
 
             // Store producer with reference to socket id
             producer.appData.socketId = socket.id;
+            producer.appData.email = socket.email;
             room.producers.set(producer.id, producer);
 
             callback({ id: producer.id });
@@ -233,7 +239,8 @@ io.on('connection', (socket) => {
             // BROADCAST: Notify other clients in the room about this new producer
             socket.to(roomId).emit('new_producer', {
                 producerId: producer.id,
-                socketId: socket.id
+                socketId: socket.id,
+                email: socket.email
             });
 
         } catch (error) {
@@ -286,7 +293,8 @@ io.on('connection', (socket) => {
             for (const [id, producer] of room.producers) {
                 producers.push({
                     producerId: id,
-                    socketId: producer.appData.socketId
+                    socketId: producer.appData.socketId,
+                    email: producer.appData.email
                 });
             }
             callback(producers);
@@ -304,6 +312,18 @@ io.on('connection', (socket) => {
             await consumer.resume();
             callback({ success: true });
         }
+    });
+
+    socket.on('mute_participant', (data) => {
+        // data: { roomId, targetSocketId }
+        console.log(`Host ${socket.id} muting participant ${data.targetSocketId} in room ${data.roomId}`);
+        io.to(data.targetSocketId).emit('mute_local_audio');
+    });
+
+    socket.on('mute_all', (data) => {
+        // data: { roomId }
+        console.log(`Host ${socket.id} muting everyone in room ${data.roomId}`);
+        socket.to(data.roomId).emit('mute_local_audio');
     });
 
     socket.on('disconnect', () => {

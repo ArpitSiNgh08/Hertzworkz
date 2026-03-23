@@ -1,3 +1,20 @@
+const os = require('os');
+
+function getLocalIp() {
+    const interfaces = os.networkInterfaces();
+    for (const name of Object.keys(interfaces)) {
+        for (const iface of interfaces[name]) {
+            if (iface.family === 'IPv4' && !iface.internal) {
+                return iface.address;
+            }
+        }
+    }
+    return '127.0.0.1';
+}
+
+const announcedIp = process.env.MEDIASOUP_ANNOUNCED_IP;
+const finalAnnouncedIp = (announcedIp && announcedIp !== '127.0.0.1') ? announcedIp : getLocalIp();
+
 module.exports = {
     mediasoup: {
         // Worker settings
@@ -38,7 +55,7 @@ module.exports = {
             listenIps: [
                 {
                     ip: process.env.MEDIASOUP_LISTEN_IP || '0.0.0.0',
-                    announcedIp: process.env.MEDIASOUP_ANNOUNCED_IP || '127.0.0.1', // Change this to your public IP in production
+                    announcedIp: finalAnnouncedIp,
                 },
             ],
             enableUdp: true,

@@ -9,11 +9,19 @@ export type CallStatus = 'dialing' | 'ringing' | 'connected' | 'ended' | 'declin
 interface CallInterfaceProps {
     status: CallStatus;
     remoteUserEmail: string;
-    remoteStreams: { socketId: string, stream: MediaStream }[];
+    remoteStreams: { socketId: string, email: string, stream: MediaStream }[];
     localStream: MediaStream | null;
     onAccept: () => void;
     onDecline: () => void;
     onEnd: () => void;
+    isMuted: boolean;
+    isVideoOff: boolean;
+    onToggleMute: () => void;
+    onToggleVideo: () => void;
+    isHost: boolean;
+    isGroupCall: boolean;
+    onMuteParticipant: (socketId: string) => void;
+    onMuteAll: () => void;
 }
 
 export function CallInterface({
@@ -23,10 +31,16 @@ export function CallInterface({
     localStream,
     onAccept,
     onDecline,
-    onEnd
+    onEnd,
+    isMuted,
+    isVideoOff,
+    onToggleMute,
+    onToggleVideo,
+    isHost,
+    isGroupCall,
+    onMuteParticipant,
+    onMuteAll
 }: CallInterfaceProps) {
-    const [isMuted, setIsMuted] = useState(true);
-    const [isVideoOff, setIsVideoOff] = useState(true);
     const localVideoRef = useRef<HTMLVideoElement>(null);
     const [mounted, setMounted] = useState(false);
 
@@ -43,13 +57,17 @@ export function CallInterface({
 
     useEffect(() => {
         if (localStream) {
-            localStream.getAudioTracks().forEach(track => track.enabled = !isMuted);
+            localStream.getAudioTracks().forEach(track => {
+                track.enabled = !isMuted;
+            });
         }
     }, [isMuted, localStream]);
 
     useEffect(() => {
         if (localStream) {
-            localStream.getVideoTracks().forEach(track => track.enabled = !isVideoOff);
+            localStream.getVideoTracks().forEach(track => {
+                track.enabled = !isVideoOff;
+            });
         }
     }, [isVideoOff, localStream]);
 
@@ -115,8 +133,17 @@ export function CallInterface({
                                 <div className="absolute bottom-4 left-4 right-4 flex items-center justify-between">
                                     <div className="px-3 py-1.5 bg-black/40 backdrop-blur-md text-white rounded-xl flex items-center gap-2 border border-white/10">
                                         <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
-                                        <span className="text-xs font-semibold">Remote Participant</span>
+                                        <span className="text-xs font-semibold">{item.email?.split('@')[0] || 'Remote'}</span>
                                     </div>
+                                    {isGroupCall && isHost && (
+                                        <button
+                                            onClick={() => onMuteParticipant(item.socketId)}
+                                            className="p-2 bg-rose-500/80 hover:bg-rose-600 text-white rounded-xl backdrop-blur-md transition-all transform hover:scale-110"
+                                            title="Mute Participant"
+                                        >
+                                            <MicOff size={16} />
+                                        </button>
+                                    )}
                                 </div>
                             </div>
                         ))}
@@ -159,7 +186,7 @@ export function CallInterface({
                             </div>
                         )}
                         <div className="absolute bottom-2 left-2 px-2 py-0.5 bg-black/40 backdrop-blur-sm text-white text-[10px] rounded-md border border-white/10">
-                            You
+                            You {isGroupCall && isHost ? '(Host)' : ''}
                         </div>
                     </div>
                 )}
@@ -170,7 +197,7 @@ export function CallInterface({
                 {status === 'dialing' || status === 'connected' ? (
                     <>
                         <button
-                            onClick={() => setIsMuted(!isMuted)}
+                            onClick={onToggleMute}
                             className={`w-14 h-14 rounded-2xl flex items-center justify-center transition-all transform hover:scale-110 active:scale-95 ${isMuted ? 'bg-rose-500/20 text-rose-500 border border-rose-500/30' : 'bg-white/10 text-white border border-white/10 hover:bg-white/20'}`}
                         >
                             {isMuted ? <MicOff size={24} /> : <Mic size={24} />}
@@ -184,11 +211,25 @@ export function CallInterface({
                         </button>
 
                         <button
-                            onClick={() => setIsVideoOff(!isVideoOff)}
+                            onClick={onToggleVideo}
                             className={`w-14 h-14 rounded-2xl flex items-center justify-center transition-all transform hover:scale-110 active:scale-95 ${isVideoOff ? 'bg-rose-500/20 text-rose-500 border border-rose-500/30' : 'bg-white/10 text-white border border-white/10 hover:bg-white/20'}`}
                         >
                             {isVideoOff ? <VideoOff size={24} /> : <Video size={24} />}
                         </button>
+
+                        {isGroupCall && isHost && status === 'connected' && (
+                            <div className="w-px h-8 bg-white/10 mx-2" />
+                        )}
+
+                        {isGroupCall && isHost && status === 'connected' && (
+                            <button
+                                onClick={onMuteAll}
+                                className="px-6 py-3 rounded-2xl bg-zinc-800 hover:bg-zinc-700 text-white font-semibold text-sm transition-all border border-white/10 flex items-center gap-2 hover:scale-105 active:scale-95"
+                            >
+                                <MicOff size={18} className="text-rose-500" />
+                                Mute Everyone
+                            </button>
+                        )}
                     </>
                 ) : null}
             </div>

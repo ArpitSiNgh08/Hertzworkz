@@ -22,7 +22,8 @@ router.post('/create', async (req, res) => {
         });
 
         await newGroup.save();
-        res.status(201).json(newGroup);
+        const populatedGroup = await Group.findById(newGroup._id).populate('members', 'email _id');
+        res.status(201).json(populatedGroup);
     } catch (error) {
         console.error('Error creating group:', error);
         res.status(500).json({ message: 'Server error', error: error.message });

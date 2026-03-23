@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
-import { Send, User as UserIcon, Search, MessageSquare, Phone, PhoneOff } from 'lucide-react';
+import { Send, User as UserIcon, Search, MessageSquare, Phone, PhoneOff, Info, X } from 'lucide-react';
 import { io, Socket } from 'socket.io-client';
 import { MediasoupClient } from '../lib/mediasoup';
 import { CallInterface, CallStatus } from './CallInterface';
@@ -54,11 +54,14 @@ export function Chat() {
     const [incomingGroupCall, setIncomingGroupCall] = useState<{ callerId: string, callerEmail: string, groupId: string, groupName: string } | null>(null);
     const [callStatus, setCallStatus] = useState<CallStatus | 'idle'>('idle');
     const [callRemoteEmail, setCallRemoteEmail] = useState('');
-    const [remoteStreams, setRemoteStreams] = useState<{ socketId: string, stream: MediaStream }[]>([]);
+    const [remoteStreams, setRemoteStreams] = useState<{ socketId: string, email: string, stream: MediaStream }[]>([]);
     const [localStream, setLocalStream] = useState<MediaStream | null>(null);
+    const [isMuted, setIsMuted] = useState(true);
+    const [isVideoOff, setIsVideoOff] = useState(true);
     const [showCreateGroup, setShowCreateGroup] = useState(false);
     const [newGroupName, setNewGroupName] = useState('');
     const [selectedMembers, setSelectedMembers] = useState<string[]>([]);
+    const [showGroupDetails, setShowGroupDetails] = useState(false);
 
     const scrollRef = useRef<HTMLDivElement>(null);
     const socketRef = useRef<Socket | null>(null);
@@ -125,7 +128,7 @@ export function Chat() {
 
         socketRef.current.on('connect', () => {
             console.log('Connected to socket server');
-            socketRef.current?.emit('join', currentUser.id);
+            socketRef.current?.emit('join', { userId: currentUser.id, email: currentUser.email });
         });
 
         socketRef.current.on('receive_message', (data: Message) => {
@@ -198,7 +201,12 @@ export function Chat() {
             setRemoteStreams(prev => prev.filter(s => s.socketId !== data.fromId));
         });
 
-        socketRef.current.on('new_producer', async (data: { producerId: string, socketId: string }) => {
+        socketRef.current.on('mute_local_audio', () => {
+            console.log('You have been muted by the host');
+            setIsMuted(true);
+        });
+
+        socketRef.current.on('new_producer', async (data: { producerId: string, socketId: string, email: string }) => {
             if (!msClientRef.current || !socketRef.current) return;
             // Ensure device is initialized before handling new producers
             if (!msClientRef.current.isLoaded()) return;
@@ -217,7 +225,7 @@ export function Chat() {
                         return [...updated];
                     } else {
                         const newStream = new MediaStream([consumer.track]);
-                        return [...prev, { socketId: data.socketId, stream: newStream }];
+                        return [...prev, { socketId: data.socketId, email: data.email, stream: newStream }];
                     }
                 });
             } catch (error) {
@@ -427,7 +435,7 @@ export function Chat() {
                                 return [...updated];
                             } else {
                                 const newStream = new MediaStream([consumer.track]);
-                                return [...prev, { socketId: p.socketId, stream: newStream }];
+                                return [...prev, { socketId: p.socketId, email: p.email, stream: newStream }];
                             }
                         });
                     } catch (err) {
@@ -496,6 +504,20 @@ export function Chat() {
             msClientRef.current = null;
         }
         recvTransportRef.current = null;
+        setIsMuted(true);
+        setIsVideoOff(true);
+    };
+
+    const handleMuteParticipant = (socketId: string) => {
+        const roomId = selectedGroup?._id || incomingGroupCall?.groupId || incomingCall?.callerId || selectedUser?._id;
+        if (!roomId) return;
+        socketRef.current?.emit('mute_participant', { roomId, targetSocketId: socketId });
+    };
+
+    const handleMuteAll = () => {
+        const roomId = selectedGroup?._id || incomingGroupCall?.groupId || incomingCall?.callerId || selectedUser?._id;
+        if (!roomId) return;
+        socketRef.current?.emit('mute_all', { roomId });
     };
 
     const filteredUsers = users.filter(u =>
@@ -666,14 +688,25 @@ export function Chat() {
                                 <div className={`w-10 h-10 rounded-full flex items-center justify-center ${selectedUser ? 'bg-rose-100 dark:bg-rose-950/40 text-rose-600' : 'bg-indigo-100 dark:bg-indigo-950/40 text-indigo-600'}`}>
                                     {selectedUser ? <UserIcon size={20} /> : <MessageSquare size={20} />}
                                 </div>
-                                <div>
+                                <div className="flex-1">
                                     <h3 className="font-bold text-foreground">{selectedUser ? selectedUser.email.split('@')[0] : selectedGroup?.name}</h3>
                                     <p className="text-xs text-green-500">{selectedUser ? 'Online' : `${selectedGroup?.members.length} members`}</p>
                                 </div>
                             </div>
-                            <button onClick={handleInitiateCall} disabled={callStatus !== 'idle'} className="p-2.5 rounded-full bg-rose-600 text-white hover:bg-rose-700">
-                                <Phone size={18} />
-                            </button>
+                            <div className="flex items-center gap-3">
+                                {selectedGroup && (
+                                    <button
+                                        onClick={() => setShowGroupDetails(true)}
+                                        className="p-2.5 rounded-full bg-secondary text-muted-foreground hover:text-foreground transition-colors"
+                                        title="Group Info"
+                                    >
+                                        <Info size={18} />
+                                    </button>
+                                )}
+                                <button onClick={handleInitiateCall} disabled={callStatus !== 'idle'} className="p-2.5 rounded-full bg-rose-600 text-white hover:bg-rose-700">
+                                    <Phone size={18} />
+                                </button>
+                            </div>
                         </div>
 
                         {/* Video Grid */}
@@ -688,7 +721,7 @@ export function Chat() {
                                             className="w-full h-full object-cover"
                                         />
                                         <div className="absolute bottom-2 left-2 px-2 py-1 bg-black/60 text-white text-[10px] rounded backdrop-blur-sm">
-                                            Remote User
+                                            {item.email?.split('@')[0] || 'Remote User'}
                                         </div>
                                     </div>
                                 ))}
@@ -748,7 +781,78 @@ export function Chat() {
                     onAccept={handleAcceptCall}
                     onDecline={handleDeclineCall}
                     onEnd={handleEndCall}
+                    isMuted={isMuted}
+                    isVideoOff={isVideoOff}
+                    onToggleMute={() => setIsMuted(!isMuted)}
+                    onToggleVideo={() => setIsVideoOff(!isVideoOff)}
+                    isHost={
+                        (!!selectedGroup && selectedGroup.createdBy === currentUser?.id) || 
+                        (!!incomingGroupCall && groups.find(g => g._id === incomingGroupCall.groupId)?.createdBy === currentUser?.id) ||
+                        (!!selectedUser && !incomingCall)
+                    }
+                    isGroupCall={!!selectedGroup || !!incomingGroupCall}
+                    onMuteParticipant={handleMuteParticipant}
+                    onMuteAll={handleMuteAll}
                 />
+            )}
+
+            {/* Group Details Modal */}
+            {showGroupDetails && selectedGroup && (
+                <div className="fixed inset-0 z-[100] bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+                    <div className="bg-card border border-border p-6 rounded-2xl shadow-2xl w-full max-w-md">
+                        <div className="flex justify-between items-center mb-6">
+                            <h3 className="text-xl font-bold text-foreground">Group Details</h3>
+                            <button onClick={() => setShowGroupDetails(false)} className="text-muted-foreground hover:text-foreground">
+                                <X size={20} />
+                            </button>
+                        </div>
+                        
+                        <div className="space-y-6">
+                            <div className="flex flex-col items-center gap-2">
+                                <div className="w-20 h-20 rounded-full bg-indigo-100 dark:bg-indigo-950/40 flex items-center justify-center text-indigo-600 mb-2">
+                                    <MessageSquare size={40} />
+                                </div>
+                                <h4 className="text-lg font-bold">{selectedGroup.name}</h4>
+                                <p className="text-sm text-muted-foreground">{selectedGroup.members.length} members</p>
+                            </div>
+
+                            <div>
+                                <h5 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider mb-3">Members</h5>
+                                <div className="space-y-3 max-h-60 overflow-y-auto pr-2">
+                                    {selectedGroup.members.map((member: any) => {
+                                        const memberId = typeof member === 'object' ? member._id : member;
+                                        const memberEmail = typeof member === 'object' ? member.email : 'Loading...';
+                                        const isAdmin = memberId === selectedGroup.createdBy;
+                                        
+                                        return (
+                                            <div key={memberId} className="flex items-center gap-3 p-2 rounded-lg bg-secondary/30 border border-border/50">
+                                                <div className="w-8 h-8 rounded-full bg-rose-100 dark:bg-rose-950/40 flex items-center justify-center text-rose-600">
+                                                    <UserIcon size={14} />
+                                                </div>
+                                                <div className="flex-1">
+                                                    <p className="text-sm font-medium">{memberEmail.split('@')[0]} {memberId === currentUser?.id ? '(You)' : ''}</p>
+                                                    <p className="text-[10px] text-muted-foreground">{memberEmail}</p>
+                                                </div>
+                                                {isAdmin && (
+                                                    <span className="px-2 py-0.5 bg-rose-500/10 text-rose-500 text-[10px] font-bold rounded-full border border-rose-500/20">
+                                                        ADMIN
+                                                    </span>
+                                                )}
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            </div>
+
+                            <button
+                                onClick={() => setShowGroupDetails(false)}
+                                className="w-full py-2.5 rounded-xl bg-secondary hover:bg-secondary/80 text-foreground transition-all font-medium border border-border"
+                            >
+                                Close
+                            </button>
+                        </div>
+                    </div>
+                </div>
             )}
         </div>
     );
