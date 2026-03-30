@@ -145,10 +145,15 @@ io.on('connection', (socket) => {
     socket.on('accept_group_call', (data) => {
         // data: { userId, groupId }
         console.log(`Group call accepted by ${data.userId} in group ${data.groupId}`);
+        
+        // Explicitly join the group room just in case
+        socket.join(data.groupId);
+        
         // Notify others in the group that someone joined the call
-        // In SFU, 'new_producer' will eventually handle the stream notification
         io.to(data.groupId).emit('group_participant_joined', {
-            userId: data.userId
+            userId: data.userId,
+            socketId: socket.id,
+            email: socket.email
         });
     });
 
@@ -179,6 +184,9 @@ io.on('connection', (socket) => {
 
     // Mediasoup Signaling
     const { getRouter, createWebRtcTransport, rooms } = require('./mediasoup/sfu');
+    const privateAudioSessions = new Map();
+    // Map key: socketId of one party → value: { partnerSocketId, roomId }
+    // Stored for BOTH parties so lookup works from either side
 
     socket.on('getRouterRtpCapabilities', async (data, callback) => {
         try {
@@ -221,7 +229,7 @@ io.on('connection', (socket) => {
 
     socket.on('produce', async (data, callback) => {
         try {
-            const { roomId, transportId, kind, rtpParameters } = data;
+            const { roomId, transportId, kind, rtpParameters, isPrivate, privatePartnerSocketId } = data;
             const room = rooms.get(roomId || 'default');
             const transport = room?.transports.get(transportId);
 
@@ -232,16 +240,27 @@ io.on('connection', (socket) => {
             // Store producer with reference to socket id
             producer.appData.socketId = socket.id;
             producer.appData.email = socket.email;
+            producer.appData.isPrivate = isPrivate || false;
+            producer.appData.privatePartnerSocketId = privatePartnerSocketId || null;
             room.producers.set(producer.id, producer);
 
             callback({ id: producer.id });
 
             // BROADCAST: Notify other clients in the room about this new producer
-            socket.to(roomId).emit('new_producer', {
-                producerId: producer.id,
-                socketId: socket.id,
-                email: socket.email
-            });
+            if (!producer.appData.isPrivate) {
+                socket.to(roomId).emit('new_producer', {
+                    producerId: producer.id,
+                    socketId: socket.id,
+                    email: socket.email
+                });
+            } else {
+                // Only notify the private partner
+                io.to(privatePartnerSocketId).emit('new_private_producer', {
+                    producerId: producer.id,
+                    socketId: socket.id,
+                    email: socket.email
+                });
+            }
 
         } catch (error) {
             console.error('produce error:', error);
@@ -291,15 +310,51 @@ io.on('connection', (socket) => {
 
             const producers = [];
             for (const [id, producer] of room.producers) {
+                if (producer.appData.isPrivate) continue;
                 producers.push({
                     producerId: id,
                     socketId: producer.appData.socketId,
-                    email: producer.appData.email
+                    email: producer.appData.email,
+                    kind: producer.kind
                 });
             }
             callback(producers);
         } catch (error) {
             console.error('get_producers error:', error);
+            callback({ error: error.message });
+        }
+    });
+
+    socket.on('get_call_participants', async (data, callback) => {
+        try {
+            const { roomId } = data;
+            const room = rooms.get(roomId || 'default');
+            if (!room) return callback([]);
+
+            // We can get participants from the active transports in the room
+            const participantsMap = new Map();
+            
+            // Add self to the list if in room? No, client knows self.
+            
+            for (const [id, transport] of room.transports) {
+                const sId = transport.appData.socketId;
+                if (sId && sId !== socket.id) {
+                    // Try to find the email from any producer this socket has
+                    let email = 'Unknown';
+                    for (const [pId, producer] of room.producers) {
+                        if (producer.appData.socketId === sId) {
+                            email = producer.appData.email;
+                            break;
+                        }
+                    }
+                    // If no email found in producers, we might need another way to store it.
+                    // For now, let's just use what we have.
+                    participantsMap.set(sId, { socketId: sId, email: email });
+                }
+            }
+            callback(Array.from(participantsMap.values()));
+        } catch (error) {
+            console.error('get_call_participants error:', error);
             callback({ error: error.message });
         }
     });
@@ -326,6 +381,54 @@ io.on('connection', (socket) => {
         socket.to(data.roomId).emit('mute_local_audio');
     });
 
+    socket.on('request_private_audio', (data) => {
+        // Received data: { targetSocketId, requesterEmail, roomId }
+        const { targetSocketId, requesterEmail, roomId } = data;
+        io.to(targetSocketId).emit('incoming_private_audio_request', {
+            requesterSocketId: socket.id,
+            requesterEmail,
+            roomId
+        });
+    });
+
+    socket.on('accept_private_audio', (data) => {
+        // Received data: { requesterSocketId, roomId }
+        const { requesterSocketId, roomId } = data;
+        privateAudioSessions.set(socket.id, { partnerSocketId: requesterSocketId, roomId });
+        privateAudioSessions.set(requesterSocketId, { partnerSocketId: socket.id, roomId });
+
+        io.to(socket.id).emit('private_audio_accepted', { partnerSocketId: requesterSocketId, partnerEmail: socket.email });
+        io.to(requesterSocketId).emit('private_audio_accepted', { partnerSocketId: socket.id, partnerEmail: socket.email });
+    });
+
+    socket.on('decline_private_audio', (data) => {
+        // Received data: { requesterSocketId }
+        const { requesterSocketId } = data;
+        io.to(requesterSocketId).emit('private_audio_declined', { declinerEmail: socket.email });
+    });
+
+    socket.on('end_private_audio', (data) => {
+        // Received data: { roomId }
+        const { roomId } = data;
+        const session = privateAudioSessions.get(socket.id);
+        if (session) {
+            privateAudioSessions.delete(socket.id);
+            privateAudioSessions.delete(session.partnerSocketId);
+            io.to(session.partnerSocketId).emit('private_audio_ended', { endedBySocketId: socket.id });
+            io.to(socket.id).emit('private_audio_ended', { endedBySocketId: socket.id });
+
+            const room = rooms.get(roomId || 'default');
+            if (room) {
+                for (const [id, producer] of room.producers) {
+                    if (producer.appData.isPrivate === true && (producer.appData.socketId === socket.id || producer.appData.socketId === session.partnerSocketId)) {
+                        producer.close();
+                        room.producers.delete(id);
+                    }
+                }
+            }
+        }
+    });
+
     socket.on('disconnect', () => {
         console.log('User disconnected:', socket.id);
 
@@ -337,6 +440,16 @@ io.on('connection', (socket) => {
         if (roomId) {
             console.log(`Notifying room ${roomId} about participant ${socket.id} leaving`);
             socket.to(roomId).emit('participant_left', { socketId: socket.id });
+        }
+
+        // Clean up any active private audio session
+        const privateSession = privateAudioSessions.get(socket.id);
+        if (privateSession) {
+            privateAudioSessions.delete(socket.id);
+            privateAudioSessions.delete(privateSession.partnerSocketId);
+            io.to(privateSession.partnerSocketId).emit('private_audio_ended', { 
+                endedBySocketId: socket.id 
+            });
         }
     });
 });

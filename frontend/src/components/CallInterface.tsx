@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
-import { Phone, PhoneOff, Video, VideoOff, Mic, MicOff, User } from 'lucide-react';
+import { Phone, PhoneOff, Video, VideoOff, Mic, MicOff, User, Users, Lock, X } from 'lucide-react';
 
 export type CallStatus = 'dialing' | 'ringing' | 'connected' | 'ended' | 'declined';
 
@@ -22,6 +22,97 @@ interface CallInterfaceProps {
     isGroupCall: boolean;
     onMuteParticipant: (socketId: string) => void;
     onMuteAll: () => void;
+    participants: { socketId: string, email: string }[];
+    hostSocketId: string;
+    mySocketId: string;
+    activePrivateSession: { socketId: string, email: string } | null;
+    onRequestPrivateAudio: (targetSocketId: string, targetEmail: string) => void;
+    onEndPrivateAudio: () => void;
+    pendingPrivateRequest: { requesterSocketId: string, requesterEmail: string } | null;
+    onAcceptPrivateAudio: (requesterSocketId: string) => void;
+    onDeclinePrivateAudio: (requesterSocketId: string) => void;
+    remotePrivateStream: MediaStream | null;
+}
+
+interface SidebarProps {
+    isOpen: boolean;
+    onClose: () => void;
+    participants: { socketId: string, email: string }[];
+    mySocketId: string;
+    hostSocketId: string;
+    isHost: boolean;
+    activePrivateSession: { socketId: string, email: string } | null;
+    onRequestPrivateAudio: (socketId: string, email: string) => void;
+}
+
+function ParticipantsSidebar({
+    isOpen,
+    onClose,
+    participants,
+    mySocketId,
+    hostSocketId,
+    isHost,
+    activePrivateSession,
+    onRequestPrivateAudio
+}: SidebarProps) {
+    if (!isOpen) return null;
+
+    return (
+        <div className="fixed inset-y-0 right-0 w-80 z-[250] bg-zinc-900 border-l border-white/10 shadow-2xl flex flex-col animate-in slide-in-from-right duration-300">
+            <div className="p-4 border-b border-white/10 flex items-center justify-between">
+                <h3 className="text-white font-bold flex items-center gap-2">
+                    <Users size={18} /> Participants
+                </h3>
+                <button onClick={onClose} className="text-zinc-400 hover:text-white transition-colors">
+                    <X size={20} />
+                </button>
+            </div>
+            <div className="flex-1 overflow-y-auto p-4 space-y-4">
+                {participants.map((p) => {
+                    const isMe = p.socketId === mySocketId;
+                    const isGroupAdmin = p.socketId === hostSocketId;
+                    const isActivePrivate = activePrivateSession?.socketId === p.socketId;
+                    const canRequestPrivate = !isMe && !activePrivateSession && (isHost || p.socketId === hostSocketId);
+
+                    return (
+                        <div key={p.socketId} className={`flex items-center justify-between p-3 rounded-xl border transition-all ${isActivePrivate ? 'bg-emerald-500/10 border-emerald-500/30' : 'bg-white/5 border-transparent'}`}>
+                            <div className="flex items-center gap-3">
+                                <div className="w-8 h-8 rounded-full bg-zinc-800 flex items-center justify-center text-zinc-400">
+                                    <User size={16} />
+                                </div>
+                                <div>
+                                    <p className="text-sm font-medium text-white truncate max-w-[120px]">
+                                        {p.email.split('@')[0]} {isMe ? '(You)' : ''}
+                                    </p>
+                                    <div className="flex items-center gap-2">
+                                        {isGroupAdmin && (
+                                            <span className="text-[10px] bg-rose-500/20 text-rose-400 px-1.5 py-0.5 rounded border border-rose-500/20">Host</span>
+                                        )}
+                                        {isActivePrivate && (
+                                            <span className="flex items-center gap-1 text-[10px] text-emerald-400">
+                                                <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                                                Private
+                                            </span>
+                                        )}
+                                    </div>
+                                </div>
+                            </div>
+                            {!isMe && (
+                                <button
+                                    onClick={() => onRequestPrivateAudio(p.socketId, p.email)}
+                                    disabled={!canRequestPrivate}
+                                    className={`p-2 rounded-lg transition-all ${canRequestPrivate ? 'bg-emerald-500/10 text-emerald-500 hover:bg-emerald-500 hover:text-white' : 'bg-zinc-800 text-zinc-600 cursor-not-allowed'}`}
+                                    title={activePrivateSession ? "Private session active" : "Request Private Audio"}
+                                >
+                                    <Lock size={14} />
+                                </button>
+                            )}
+                        </div>
+                    );
+                })}
+            </div>
+        </div>
+    );
 }
 
 export function CallInterface({
@@ -39,10 +130,28 @@ export function CallInterface({
     isHost,
     isGroupCall,
     onMuteParticipant,
-    onMuteAll
+    onMuteAll,
+    participants,
+    hostSocketId,
+    mySocketId,
+    activePrivateSession,
+    onRequestPrivateAudio,
+    onEndPrivateAudio,
+    pendingPrivateRequest,
+    onAcceptPrivateAudio,
+    onDeclinePrivateAudio,
+    remotePrivateStream
 }: CallInterfaceProps) {
     const localVideoRef = useRef<HTMLVideoElement>(null);
+    const privateAudioRef = useRef<HTMLAudioElement>(null);
     const [mounted, setMounted] = useState(false);
+    const [showParticipants, setShowParticipants] = useState(false);
+
+    useEffect(() => {
+        if (privateAudioRef.current && remotePrivateStream) {
+            privateAudioRef.current.srcObject = remotePrivateStream;
+        }
+    }, [remotePrivateStream]);
 
     useEffect(() => {
         setMounted(true);
@@ -55,21 +164,7 @@ export function CallInterface({
         }
     }, [localStream, status]);
 
-    useEffect(() => {
-        if (localStream) {
-            localStream.getAudioTracks().forEach(track => {
-                track.enabled = !isMuted;
-            });
-        }
-    }, [isMuted, localStream]);
 
-    useEffect(() => {
-        if (localStream) {
-            localStream.getVideoTracks().forEach(track => {
-                track.enabled = !isVideoOff;
-            });
-        }
-    }, [isVideoOff, localStream]);
 
     if (status === 'ended' || status === 'declined') return null;
     if (!mounted) return null;
@@ -113,40 +208,98 @@ export function CallInterface({
             {/* Background blur/gradient */}
             <div className="absolute inset-0 bg-gradient-to-b from-rose-900/20 via-zinc-950 to-zinc-950" />
 
+            {/* Private audio incoming request notification */}
+            {pendingPrivateRequest && (
+                <div className="fixed top-6 left-1/2 -translate-x-1/2 z-[350] w-96 bg-zinc-900 border border-emerald-500/30 rounded-2xl shadow-2xl p-4 flex flex-col gap-4 animate-in slide-in-from-top duration-500">
+                    <div className="flex items-center gap-3">
+                        <div className="w-10 h-10 rounded-full bg-emerald-500/10 flex items-center justify-center text-emerald-500">
+                            <Lock size={20} />
+                        </div>
+                        <div>
+                            <p className="text-white font-semibold text-sm">Private Audio Request</p>
+                            <p className="text-zinc-400 text-xs">{pendingPrivateRequest.requesterEmail.split('@')[0]} wants a private audio session</p>
+                        </div>
+                    </div>
+                    <div className="flex gap-3 justify-end">
+                        <button onClick={() => onDeclinePrivateAudio(pendingPrivateRequest.requesterSocketId)} className="px-4 py-2 rounded-xl bg-red-500/10 text-red-400 hover:bg-red-500 hover:text-white text-sm font-medium transition-all">Decline</button>
+                        <button onClick={() => onAcceptPrivateAudio(pendingPrivateRequest.requesterSocketId)} className="px-4 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-600 text-white text-sm font-medium transition-all">Accept</button>
+                    </div>
+                </div>
+            )}
+
+            {/* Private session active banner */}
+            {activePrivateSession && (
+                <div className="absolute top-6 left-1/2 -translate-x-1/2 z-[220] flex items-center gap-3 px-5 py-3 bg-emerald-500/10 border border-emerald-500/30 rounded-2xl backdrop-blur-md animate-in slide-in-from-top duration-500">
+                    <Lock size={18} className="text-emerald-400" />
+                    <span className="text-emerald-400 text-sm font-semibold">
+                        Private audio session active with {activePrivateSession.email.split('@')[0]}
+                    </span>
+                    <button onClick={onEndPrivateAudio} className="ml-2 px-3 py-1 bg-rose-500/20 text-rose-400 hover:bg-rose-500 hover:text-white rounded-lg text-xs font-medium transition-all">
+                        End Session
+                    </button>
+                </div>
+            )}
+
             {/* Remote Video / Primary Display */}
             <div className="relative w-full h-full flex items-center justify-center p-4">
-                {status === 'connected' && remoteStreams.length > 0 ? (
-                    <div className={`grid gap-4 w-full h-full max-w-7xl mx-auto transition-all duration-500 ${remoteStreams.length === 1 ? 'grid-cols-1' :
-                        remoteStreams.length === 2 ? 'grid-cols-1 md:grid-cols-2' :
-                            remoteStreams.length <= 4 ? 'grid-cols-2' :
-                                'grid-cols-2 lg:grid-cols-3'
-                        }`}>
-                        {remoteStreams.map((item) => (
-                            <div key={item.socketId} className="relative w-full h-full min-h-[200px] bg-zinc-900 rounded-3xl overflow-hidden border border-white/5 shadow-2xl group transition-all hover:scale-[1.02]">
-                                <video
-                                    ref={(el) => { if (el) el.srcObject = item.stream; }}
-                                    autoPlay
-                                    playsInline
-                                    className="w-full h-full object-cover"
-                                />
-                                <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
-                                <div className="absolute bottom-4 left-4 right-4 flex items-center justify-between">
-                                    <div className="px-3 py-1.5 bg-black/40 backdrop-blur-md text-white rounded-xl flex items-center gap-2 border border-white/10">
-                                        <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
-                                        <span className="text-xs font-semibold">{item.email?.split('@')[0] || 'Remote'}</span>
-                                    </div>
-                                    {isGroupCall && isHost && (
-                                        <button
-                                            onClick={() => onMuteParticipant(item.socketId)}
-                                            className="p-2 bg-rose-500/80 hover:bg-rose-600 text-white rounded-xl backdrop-blur-md transition-all transform hover:scale-110"
-                                            title="Mute Participant"
-                                        >
-                                            <MicOff size={16} />
-                                        </button>
+                {status === 'connected' ? (
+                    <div className={`grid gap-4 w-full h-full max-w-7xl mx-auto transition-all duration-500 ${
+                        participants.filter(p => p.socketId !== mySocketId).length <= 1 ? 'grid-cols-1' :
+                        participants.filter(p => p.socketId !== mySocketId).length === 2 ? 'grid-cols-1 md:grid-cols-2' :
+                        participants.filter(p => p.socketId !== mySocketId).length <= 4 ? 'grid-cols-2' :
+                        'grid-cols-2 lg:grid-cols-3'
+                    }`}>
+                        {participants.filter(p => p.socketId !== mySocketId).map((p) => {
+                            const remoteItem = remoteStreams.find(s => s.socketId === p.socketId);
+                            const hasVideo = remoteItem && remoteItem.stream.getVideoTracks().length > 0;
+
+                            return (
+                                <div key={p.socketId} className="relative w-full h-full min-h-[200px] bg-zinc-900 rounded-3xl overflow-hidden border border-white/5 shadow-2xl group transition-all hover:scale-[1.02]">
+                                    <video
+                                        ref={(el) => { if (el && remoteItem) el.srcObject = remoteItem.stream; }}
+                                        autoPlay
+                                        playsInline
+                                        className="w-full h-full object-cover"
+                                    />
+                                    {!hasVideo && (
+                                        <div className="absolute inset-0 bg-zinc-900 flex flex-col items-center justify-center gap-4">
+                                            <div className="w-20 h-20 rounded-full bg-rose-500/10 flex items-center justify-center text-rose-500 border border-rose-500/20 shadow-xl shadow-rose-500/5">
+                                                <User size={32} />
+                                            </div>
+                                            <p className="text-zinc-500 text-sm font-medium">Participant hasn&apos;t turned on video</p>
+                                        </div>
                                     )}
+                                    <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
+                                    <div className="absolute bottom-4 left-4 right-4 flex items-center justify-between">
+                                        <div className="px-3 py-1.5 bg-black/40 backdrop-blur-md text-white rounded-xl flex items-center gap-2 border border-white/10">
+                                            <div className={`w-2 h-2 rounded-full ${remoteItem ? 'bg-green-500 animate-pulse' : 'bg-zinc-600'}`} />
+                                            <span className="text-xs font-semibold">{p.email?.split('@')[0] || 'Remote'}</span>
+                                        </div>
+                                        {isGroupCall && isHost && (
+                                            <button
+                                                onClick={() => onMuteParticipant(p.socketId)}
+                                                className="p-2 bg-rose-500/80 hover:bg-rose-600 text-white rounded-xl backdrop-blur-md transition-all transform hover:scale-110"
+                                                title="Mute Participant"
+                                            >
+                                                <MicOff size={16} />
+                                            </button>
+                                        )}
+                                    </div>
+                                </div>
+                            );
+                        })}
+                        {/* Fallback if alone in group call */}
+                        {isGroupCall && participants.filter(p => p.socketId !== mySocketId).length === 0 && (
+                            <div className="flex flex-col items-center gap-6 animate-in fade-in duration-500">
+                                <div className="w-24 h-24 rounded-full bg-zinc-900 border border-white/10 flex items-center justify-center text-zinc-500 shadow-2xl">
+                                    <Users size={40} />
+                                </div>
+                                <div className="text-center">
+                                    <h3 className="text-white font-bold text-xl mb-1">Waiting for others to join...</h3>
+                                    <p className="text-zinc-500 text-sm">You are the only one in the call right now</p>
                                 </div>
                             </div>
-                        ))}
+                        )}
                     </div>
                 ) : (
                     <div className="flex flex-col items-center gap-6 animate-in fade-in zoom-in duration-500">
@@ -230,9 +383,42 @@ export function CallInterface({
                                 Mute Everyone
                             </button>
                         )}
+
+                        {isGroupCall && status === 'connected' && (
+                            <>
+                                <div className="w-px h-8 bg-white/10 mx-2" />
+                                <button
+                                    onClick={() => setShowParticipants(prev => !prev)}
+                                    className={`w-14 h-14 rounded-2xl flex items-center justify-center transition-all transform hover:scale-110 active:scale-95 ${showParticipants ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' : 'bg-white/10 text-white border border-white/10 hover:bg-white/20'}`}
+                                    title="Participants"
+                                >
+                                    <Users size={24} />
+                                </button>
+                            </>
+                        )}
                     </>
                 ) : null}
             </div>
+
+            <ParticipantsSidebar
+                isOpen={showParticipants}
+                onClose={() => setShowParticipants(false)}
+                participants={participants}
+                mySocketId={mySocketId}
+                hostSocketId={hostSocketId}
+                isHost={isHost}
+                activePrivateSession={activePrivateSession}
+                onRequestPrivateAudio={onRequestPrivateAudio}
+            />
+
+            {activePrivateSession && (
+                <audio
+                    ref={privateAudioRef}
+                    autoPlay
+                    playsInline
+                    className="hidden"
+                />
+            )}
         </div>
     ), document.body);
 }

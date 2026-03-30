@@ -4,7 +4,7 @@ import { Socket } from 'socket.io-client';
 export class MediasoupClient {
     private device: Device | null = null;
     private socket: Socket;
-    private roomId: string;
+    public roomId: string;
 
     constructor(socket: Socket, roomId: string) {
         this.socket = socket;
@@ -86,7 +86,7 @@ export class MediasoupClient {
         });
 
         // 4. Handle 'produce' event (signal to server)
-        transport.on('produce', async ({ kind, rtpParameters }, callback, errback) => {
+        transport.on('produce', async ({ kind, rtpParameters, appData }, callback, errback) => {
             try {
                 const { id } = await new Promise<any>((resolve, reject) => {
                     this.socket.emit('produce', {
@@ -94,6 +94,8 @@ export class MediasoupClient {
                         transportId: transport.id,
                         kind,
                         rtpParameters,
+                        isPrivate: appData.isPrivate || false,
+                        privatePartnerSocketId: appData.privatePartnerSocketId || null,
                     }, (res: any) => {
                         if (res.error) reject(res.error);
                         else resolve(res);

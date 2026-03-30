@@ -58,15 +58,27 @@ export function Chat() {
     const [localStream, setLocalStream] = useState<MediaStream | null>(null);
     const [isMuted, setIsMuted] = useState(true);
     const [isVideoOff, setIsVideoOff] = useState(true);
+    const [callParticipants, setCallParticipants] = useState<{ socketId: string, email: string }[]>([]);
     const [showCreateGroup, setShowCreateGroup] = useState(false);
     const [newGroupName, setNewGroupName] = useState('');
     const [selectedMembers, setSelectedMembers] = useState<string[]>([]);
     const [showGroupDetails, setShowGroupDetails] = useState(false);
+    const [activePrivateSession, setActivePrivateSession] = useState<{ socketId: string, email: string } | null>(null);
+    const [pendingPrivateRequest, setPendingPrivateRequest] = useState<{ requesterSocketId: string, requesterEmail: string } | null>(null);
+    const [privateSendTransport, setPrivateSendTransport] = useState<any>(null);
+    const [privateRecvTransport, setPrivateRecvTransport] = useState<any>(null);
+    const privateSendTransportRef = useRef<any>(null);
+    const privateRecvTransportRef = useRef<any>(null);
+    const [remotePrivateStream, setRemotePrivateStream] = useState<MediaStream | null>(null);
+    const privateAudioStreamRef = useRef<MediaStream | null>(null);
 
     const scrollRef = useRef<HTMLDivElement>(null);
     const socketRef = useRef<Socket | null>(null);
     const msClientRef = useRef<MediasoupClient | null>(null);
     const recvTransportRef = useRef<any>(null);
+    const sendTransportRef = useRef<any>(null);
+    const videoProducerRef = useRef<any>(null);
+    const audioProducerRef = useRef<any>(null);
     const creatingRecvTransportRef = useRef<Promise<any> | null>(null);
 
     const getOrCreateRecvTransport = async (client: MediasoupClient) => {
@@ -167,9 +179,13 @@ export function Chat() {
             }
         });
 
-        socketRef.current.on('group_participant_joined', (data: { userId: string }) => {
-            console.log('Group participant joined call:', data.userId);
-            // Mediasoup 'new_producer' will handle the actual stream
+        socketRef.current.on('group_participant_joined', (data: { userId: string, socketId: string, email: string }) => {
+            console.log('Group participant joined call:', data.socketId);
+            setCallParticipants(prev => {
+                const exists = prev.find(p => p.socketId === data.socketId);
+                if (exists) return prev;
+                return [...prev, { socketId: data.socketId, email: data.email }];
+            });
         });
 
         socketRef.current.on('call_declined', (data: { receiverId: string }) => {
@@ -184,21 +200,29 @@ export function Chat() {
             setIncomingCall(null);
             setIncomingGroupCall(null);
             setRemoteStreams([]);
+            setCallParticipants([]);
             setLocalStream(prev => {
                 if (prev) prev.getTracks().forEach(t => t.stop());
                 return null;
             });
+            if (videoProducerRef.current) videoProducerRef.current.close();
+            if (audioProducerRef.current) audioProducerRef.current.close();
+            if (sendTransportRef.current) sendTransportRef.current.close();
+            if (recvTransportRef.current) recvTransportRef.current.close();
+            videoProducerRef.current = null;
+            audioProducerRef.current = null;
+            sendTransportRef.current = null;
+            recvTransportRef.current = null;
             if (msClientRef.current) {
                 msClientRef.current.close();
                 msClientRef.current = null;
             }
-            recvTransportRef.current = null;
         });
 
         socketRef.current.on('participant_left_call', (data: { fromId: string, groupId: string }) => {
             console.log('Participant left group call:', data.fromId);
-            // Just remove that participant's stream, don't end the whole call
             setRemoteStreams(prev => prev.filter(s => s.socketId !== data.fromId));
+            setCallParticipants(prev => prev.filter(p => p.socketId !== data.fromId));
         });
 
         socketRef.current.on('mute_local_audio', () => {
@@ -236,6 +260,7 @@ export function Chat() {
         socketRef.current.on('participant_left', (data: { socketId: string }) => {
             console.log('Participant left:', data.socketId);
             setRemoteStreams(prev => prev.filter(s => s.socketId !== data.socketId));
+            setCallParticipants(prev => prev.filter(p => p.socketId !== data.socketId));
         });
 
         socketRef.current.on('group_created', async (data: { groupId: string }) => {
@@ -252,7 +277,95 @@ export function Chat() {
             }
         });
 
+        socketRef.current.on('incoming_private_audio_request', (data: { requesterSocketId: string, requesterEmail: string, roomId: string }) => {
+            console.log('Incoming private audio request from:', data.requesterEmail);
+            setPendingPrivateRequest({ requesterSocketId: data.requesterSocketId, requesterEmail: data.requesterEmail });
+        });
+
+        socketRef.current.on('private_audio_accepted', async (data: { partnerSocketId: string, partnerEmail: string }) => {
+            console.log('Private audio accepted by:', data.partnerEmail);
+            setActivePrivateSession({ socketId: data.partnerSocketId, email: data.partnerEmail });
+            setPendingPrivateRequest(null);
+
+            // Mute the group audio track
+            if (localStream) {
+                localStream.getAudioTracks().forEach(t => t.enabled = false);
+            }
+
+            // Full mediasoup private transport setup
+            if (!msClientRef.current || !socketRef.current) return;
+            const roomId = selectedGroup?._id || incomingGroupCall?.groupId;
+            if (!roomId) return;
+
+            try {
+                // 1. Setup private send transport
+                const pSendTransport = await msClientRef.current.createSendTransport();
+                setPrivateSendTransport(pSendTransport);
+                privateSendTransportRef.current = pSendTransport;
+
+                // Get user media specifically for private audio (or reuse existing)
+                const pStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                privateAudioStreamRef.current = pStream;
+
+                await pSendTransport.produce({ 
+                    track: pStream.getAudioTracks()[0],
+                    appData: { isPrivate: true, privatePartnerSocketId: data.partnerSocketId }
+                });
+
+                // 2. Setup private recv transport
+                const pRecvTransport = await msClientRef.current.createRecvTransport();
+                setPrivateRecvTransport(pRecvTransport);
+                privateRecvTransportRef.current = pRecvTransport;
+
+            } catch (error) {
+                console.error('Error setting up private audio transport:', error);
+            }
+        });
+
+        socketRef.current.on('private_audio_declined', (data: { declinerEmail: string }) => {
+            alert(`${data.declinerEmail.split('@')[0]} declined your private audio request`);
+        });
+
+        socketRef.current.on('new_private_producer', async (data: { producerId: string, socketId: string, email: string }) => {
+            console.log('New private producer from:', data.email);
+            if (!msClientRef.current || !privateRecvTransportRef.current) return;
+            
+            try {
+                const consumer = await msClientRef.current.consume(privateRecvTransportRef.current, data.producerId);
+                setRemotePrivateStream(new MediaStream([consumer.track]));
+            } catch (error) {
+                console.error('Error consuming private producer:', error);
+            }
+        });
+
+        socketRef.current.on('private_audio_ended', (data: { endedBySocketId: string }) => {
+            console.log('Private audio ended by:', data.endedBySocketId);
+            setActivePrivateSession(null);
+            setRemotePrivateStream(null);
+            // Re-enable group audio
+            if (localStream) {
+                localStream.getAudioTracks().forEach(t => {
+                    t.enabled = !isMuted;
+                });
+            }
+            // Cleanup transports via refs to avoid stale closure
+            if (privateSendTransportRef.current) privateSendTransportRef.current.close();
+            if (privateRecvTransportRef.current) privateRecvTransportRef.current.close();
+            privateSendTransportRef.current = null;
+            privateRecvTransportRef.current = null;
+            setPrivateSendTransport(null);
+            setPrivateRecvTransport(null);
+            if (privateAudioStreamRef.current) {
+                privateAudioStreamRef.current.getTracks().forEach(t => t.stop());
+                privateAudioStreamRef.current = null;
+            }
+        });
+
         return () => {
+            if (videoProducerRef.current) videoProducerRef.current.close();
+            if (audioProducerRef.current) audioProducerRef.current.close();
+            if (sendTransportRef.current) sendTransportRef.current.close();
+            if (recvTransportRef.current) recvTransportRef.current.close();
             socketRef.current?.disconnect();
         };
     }, [currentUser]);
@@ -395,6 +508,9 @@ export function Chat() {
 
         // Clean any leftover stale transport from a previous disconnected call
         recvTransportRef.current = null;
+        sendTransportRef.current = null;
+        videoProducerRef.current = null;
+        audioProducerRef.current = null;
 
         // Ensure status reflects connected
         setCallStatus('connected');
@@ -404,16 +520,43 @@ export function Chat() {
         if (initialized) {
             console.log(`SFU is ready for room: ${roomId}`);
             try {
-                const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+                const sendTransport = await msClientRef.current.createSendTransport();
+                sendTransportRef.current = sendTransport;
 
-                // Disable tracks initially so they start muted
-                stream.getVideoTracks().forEach(track => track.enabled = false);
-                stream.getAudioTracks().forEach(track => track.enabled = false);
+                const stream = new MediaStream();
                 setLocalStream(stream);
 
-                const sendTransport = await msClientRef.current.createSendTransport();
-                await msClientRef.current.produceVideo(sendTransport, stream);
-                await msClientRef.current.produceAudio(sendTransport, stream);
+                // Only get and produce if NOT muted/off
+                if (!isVideoOff) {
+                    try {
+                        const vStream = await navigator.mediaDevices.getUserMedia({ video: true });
+                        const track = vStream.getVideoTracks()[0];
+                        stream.addTrack(track);
+                        videoProducerRef.current = await msClientRef.current.produceVideo(sendTransport, vStream);
+                    } catch (e) {
+                        console.error('Error getting video track:', e);
+                        setIsVideoOff(true);
+                    }
+                }
+
+                if (!isMuted) {
+                    try {
+                        const aStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                        const track = aStream.getAudioTracks()[0];
+                        stream.addTrack(track);
+                        audioProducerRef.current = await msClientRef.current.produceAudio(sendTransport, aStream);
+                    } catch (e) {
+                        console.error('Error getting audio track:', e);
+                        setIsMuted(true);
+                    }
+                }
+
+                const participants = await new Promise<any[]>((resolve) => {
+                    socketRef.current?.emit('get_call_participants', { roomId }, (res: any) => {
+                        resolve(res || []);
+                    });
+                });
+                setCallParticipants(participants);
 
                 // Now also consume all existing producers in the room
                 const producers = await msClientRef.current.getProducers();
@@ -431,7 +574,11 @@ export function Chat() {
                             const existingIndex = prev.findIndex(s => s.socketId === p.socketId);
                             if (existingIndex !== -1) {
                                 const updated = [...prev];
-                                updated[existingIndex].stream.addTrack(consumer.track);
+                                // Check if track already exists to avoid duplicates
+                                const hasTrack = updated[existingIndex].stream.getTracks().find(t => t.id === consumer.track.id);
+                                if (!hasTrack) {
+                                    updated[existingIndex].stream.addTrack(consumer.track);
+                                }
                                 return [...updated];
                             } else {
                                 const newStream = new MediaStream([consumer.track]);
@@ -495,18 +642,96 @@ export function Chat() {
         setIncomingCall(null);
         setIncomingGroupCall(null);
         setRemoteStreams([]);
+        setCallParticipants([]);
         setLocalStream(prev => {
             if (prev) prev.getTracks().forEach(t => t.stop());
             return null;
         });
+        if (videoProducerRef.current) videoProducerRef.current.close();
+        if (audioProducerRef.current) audioProducerRef.current.close();
+        if (sendTransportRef.current) sendTransportRef.current.close();
+        if (recvTransportRef.current) recvTransportRef.current.close();
+        videoProducerRef.current = null;
+        audioProducerRef.current = null;
+        sendTransportRef.current = null;
+        recvTransportRef.current = null;
         if (msClientRef.current) {
             msClientRef.current.close();
             msClientRef.current = null;
         }
-        recvTransportRef.current = null;
         setIsMuted(true);
         setIsVideoOff(true);
     };
+
+    // Effect to handle video toggle
+    useEffect(() => {
+        if (!msClientRef.current || !sendTransportRef.current || !localStream) return;
+
+        const syncVideo = async () => {
+            if (isVideoOff) {
+                if (videoProducerRef.current) {
+                    videoProducerRef.current.close();
+                    videoProducerRef.current = null;
+                }
+                const track = localStream.getVideoTracks()[0];
+                if (track) {
+                    track.stop();
+                    localStream.removeTrack(track);
+                    setLocalStream(new MediaStream(localStream.getTracks()));
+                }
+            } else {
+                if (!videoProducerRef.current) {
+                    try {
+                        const vStream = await navigator.mediaDevices.getUserMedia({ video: true });
+                        const track = vStream.getVideoTracks()[0];
+                        localStream.addTrack(track);
+                        setLocalStream(new MediaStream(localStream.getTracks()));
+                        videoProducerRef.current = await msClientRef.current?.produceVideo(sendTransportRef.current, vStream);
+                    } catch (err) {
+                        console.error("Error starting video:", err);
+                        setIsVideoOff(true);
+                    }
+                }
+            }
+        };
+
+        syncVideo();
+    }, [isVideoOff, localStream]);
+
+    // Effect to handle audio toggle
+    useEffect(() => {
+        if (!msClientRef.current || !sendTransportRef.current || !localStream) return;
+
+        const syncAudio = async () => {
+            if (isMuted) {
+                if (audioProducerRef.current) {
+                    audioProducerRef.current.close();
+                    audioProducerRef.current = null;
+                }
+                const track = localStream.getAudioTracks()[0];
+                if (track) {
+                    track.stop();
+                    localStream.removeTrack(track);
+                    setLocalStream(new MediaStream(localStream.getTracks()));
+                }
+            } else {
+                if (!audioProducerRef.current) {
+                    try {
+                        const aStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                        const track = aStream.getAudioTracks()[0];
+                        localStream.addTrack(track);
+                        setLocalStream(new MediaStream(localStream.getTracks()));
+                        audioProducerRef.current = await msClientRef.current?.produceAudio(sendTransportRef.current, aStream);
+                    } catch (err) {
+                        console.error("Error starting audio:", err);
+                        setIsMuted(true);
+                    }
+                }
+            }
+        };
+
+        syncAudio();
+    }, [isMuted, localStream]);
 
     const handleMuteParticipant = (socketId: string) => {
         const roomId = selectedGroup?._id || incomingGroupCall?.groupId || incomingCall?.callerId || selectedUser?._id;
@@ -518,6 +743,35 @@ export function Chat() {
         const roomId = selectedGroup?._id || incomingGroupCall?.groupId || incomingCall?.callerId || selectedUser?._id;
         if (!roomId) return;
         socketRef.current?.emit('mute_all', { roomId });
+    };
+
+    const handleRequestPrivateAudio = (targetSocketId: string, targetEmail: string) => {
+        const roomId = selectedGroup?._id || incomingGroupCall?.groupId;
+        if (!roomId || !currentUser) return;
+        socketRef.current?.emit('request_private_audio', {
+            targetSocketId,
+            requesterEmail: currentUser.email,
+            roomId
+        });
+    };
+
+    const handleAcceptPrivateAudio = (requesterSocketId: string) => {
+        const roomId = selectedGroup?._id || incomingGroupCall?.groupId;
+        if (!roomId) return;
+        socketRef.current?.emit('accept_private_audio', { requesterSocketId, roomId });
+        setPendingPrivateRequest(null);
+    };
+
+    const handleDeclinePrivateAudio = (requesterSocketId: string) => {
+        socketRef.current?.emit('decline_private_audio', { requesterSocketId });
+        setPendingPrivateRequest(null);
+    };
+
+    const handleEndPrivateAudio = () => {
+        const roomId = msClientRef.current?.roomId || selectedGroup?._id || incomingGroupCall?.groupId;
+        if (!roomId) return;
+        socketRef.current?.emit('end_private_audio', { roomId });
+        // Local cleanup is handled by the 'private_audio_ended' listener but we can also trigger it
     };
 
     const filteredUsers = users.filter(u =>
@@ -793,6 +1047,23 @@ export function Chat() {
                     isGroupCall={!!selectedGroup || !!incomingGroupCall}
                     onMuteParticipant={handleMuteParticipant}
                     onMuteAll={handleMuteAll}
+                    participants={[
+                        ...(currentUser ? [{ socketId: socketRef.current?.id || 'me', email: currentUser.email }] : []),
+                        ...callParticipants
+                    ]}
+                    hostSocketId={
+                        // We need the socketId of the admin. This requires the admin to have joined correctly.
+                        // For now we'll match by email if possible or use the createdBy ID directly
+                        (selectedGroup ? users.find(u => u._id === selectedGroup.createdBy)?.email : null) || ''
+                    }
+                    mySocketId={socketRef.current?.id || ''}
+                    activePrivateSession={activePrivateSession}
+                    onRequestPrivateAudio={handleRequestPrivateAudio}
+                    onEndPrivateAudio={handleEndPrivateAudio}
+                    pendingPrivateRequest={pendingPrivateRequest}
+                    onAcceptPrivateAudio={handleAcceptPrivateAudio}
+                    onDeclinePrivateAudio={handleDeclinePrivateAudio}
+                    remotePrivateStream={remotePrivateStream}
                 />
             )}
 
