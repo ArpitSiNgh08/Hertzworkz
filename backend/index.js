@@ -113,7 +113,8 @@ io.on('connection', (socket) => {
         // Emit incoming call to the receiver's room
         io.to(data.receiverId).emit('incoming_call', {
             callerId: data.callerId,
-            callerEmail: data.callerEmail
+            callerEmail: data.callerEmail,
+            callerSocketId: socket.id
         });
     });
 
@@ -135,7 +136,8 @@ io.on('connection', (socket) => {
 
         // Emit to the caller BEFORE the receiver joins the room
         io.to(data.callerId).emit('call_accepted', {
-            receiverId: data.receiverId
+            receiverId: data.receiverId,
+            receiverSocketId: socket.id
         });
 
         // Ensure the receiver joins the caller's room for SFU signaling
@@ -251,19 +253,43 @@ io.on('connection', (socket) => {
                 socket.to(roomId).emit('new_producer', {
                     producerId: producer.id,
                     socketId: socket.id,
-                    email: socket.email
+                    email: socket.email,
+                    roomId: roomId // Added roomId for clarity
                 });
             } else {
                 // Only notify the private partner
                 io.to(privatePartnerSocketId).emit('new_private_producer', {
                     producerId: producer.id,
                     socketId: socket.id,
-                    email: socket.email
+                    email: socket.email,
+                    roomId: roomId
                 });
             }
-
         } catch (error) {
             console.error('produce error:', error);
+            callback({ error: error.message });
+        }
+    });
+
+    socket.on('close_producer', async (data, callback) => {
+        try {
+            const { roomId, producerId } = data;
+            const room = rooms.get(roomId || 'default');
+            if (room) {
+                const producer = room.producers.get(producerId);
+                // Ensure only the owner can close their producer
+                if (producer && producer.appData.socketId === socket.id) {
+                    producer.close();
+                    room.producers.delete(producerId);
+                    callback({ success: true });
+                } else {
+                    callback({ error: 'Producer not found or unauthorized' });
+                }
+            } else {
+                callback({ error: 'Room not found' });
+            }
+        } catch (error) {
+            console.error('close_producer error:', error);
             callback({ error: error.message });
         }
     });
@@ -271,14 +297,39 @@ io.on('connection', (socket) => {
     socket.on('consume', async (data, callback) => {
         try {
             const { roomId, transportId, producerId, rtpCapabilities } = data;
-            const room = rooms.get(roomId || 'default');
+            const rId = String(roomId || 'default'); // Ensure string for map lookups
+            const room = rooms.get(rId);
+            
+            if (!room) {
+                console.error(`Consume failed: Room ${rId} not found`);
+                return callback({ error: `Room ${rId} not found` });
+            }
+
             const router = room.router;
             const transport = room.transports.get(transportId);
 
-            if (!transport) throw new Error(`Transport ${transportId} not found`);
+            if (!transport) {
+                console.error(`Consume failed: Transport ${transportId} not found in room ${roomId}`);
+                return callback({ error: `Transport ${transportId} not found` });
+            }
+
+            // Check if producer exists in Mediasoup router
+            const producer = room.producers.get(producerId);
+            if (!producer) {
+                console.error(`Consume failed: Producer ${producerId} not found in room ${roomId}`);
+                return callback({ error: 'Producer not found' });
+            }
+
+            if (!rtpCapabilities || Object.keys(rtpCapabilities).length === 0) {
+                console.error('Consume failed: Empty rtpCapabilities provided');
+                return callback({ error: 'Empty rtpCapabilities' });
+            }
 
             if (!router.canConsume({ producerId, rtpCapabilities })) {
-                throw new Error('Cannot consume this producer');
+                console.error(`Consume failed: Router cannot consume producer ${producerId}`);
+                console.error(`- Client RTCPabilities: ${JSON.stringify(rtpCapabilities).substring(0, 100)}...`);
+                console.error(`- Producer codec: ${producer.kind}/${producer.rtpParameters.codecs[0].mimeType}`);
+                return callback({ error: 'Cannot consume this producer (codec mismatch or producer missing on router)' });
             }
 
             const consumer = await transport.consume({

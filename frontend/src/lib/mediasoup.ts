@@ -126,6 +126,12 @@ export class MediasoupClient {
         return producer;
     }
 
+    async closeProducer(producerId: string) {
+        return new Promise((resolve) => {
+            this.socket.emit('close_producer', { roomId: this.roomId, producerId }, resolve);
+        });
+    }
+
     async createRecvTransport() {
         if (!this.device) throw new Error('Device not initialized');
 

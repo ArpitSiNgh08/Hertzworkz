@@ -54,6 +54,7 @@ export function Chat() {
     const [incomingGroupCall, setIncomingGroupCall] = useState<{ callerId: string, callerEmail: string, groupId: string, groupName: string } | null>(null);
     const [callStatus, setCallStatus] = useState<CallStatus | 'idle'>('idle');
     const [callRemoteEmail, setCallRemoteEmail] = useState('');
+    const [callRemoteSocketId, setCallRemoteSocketId] = useState<string | null>(null);
     const [remoteStreams, setRemoteStreams] = useState<{ socketId: string, email: string, stream: MediaStream }[]>([]);
     const [localStream, setLocalStream] = useState<MediaStream | null>(null);
     const [isMuted, setIsMuted] = useState(true);
@@ -154,11 +155,12 @@ export function Chat() {
             }
         });
 
-        socketRef.current.on('incoming_call', (data: { callerId: string, callerEmail: string }) => {
+        socketRef.current.on('incoming_call', (data: { callerId: string, callerEmail: string, callerSocketId: string }) => {
             console.log('Global incoming call received:', data);
             setIncomingCall(data);
             setCallStatus('ringing');
             setCallRemoteEmail(data.callerEmail);
+            setCallRemoteSocketId(data.callerSocketId);
         });
 
         socketRef.current.on('incoming_group_call', (data: { callerId: string, callerEmail: string, groupId: string, groupName: string }) => {
@@ -168,11 +170,12 @@ export function Chat() {
             setCallRemoteEmail(`${data.groupName} (Group)`);
         });
 
-        socketRef.current.on('call_accepted', async (data: { receiverId: string }) => {
+        socketRef.current.on('call_accepted', async (data: { receiverId: string, receiverSocketId: string }) => {
             // Only the actual Caller should react to this event to spawn the Caller's SFU perspective
             // We know we are the caller if the emitted receiverId matches the user we are currently trying to call
             if (selectedUserRef.current?._id === data.receiverId) {
                 setCallStatus('connected');
+                setCallRemoteSocketId(data.receiverSocketId);
                 if (currentUser?.id) {
                     startSfuSession(currentUser.id);
                 }
@@ -201,6 +204,7 @@ export function Chat() {
             setIncomingGroupCall(null);
             setRemoteStreams([]);
             setCallParticipants([]);
+            setCallRemoteSocketId(null);
             setLocalStream(prev => {
                 if (prev) prev.getTracks().forEach(t => t.stop());
                 return null;
@@ -230,23 +234,58 @@ export function Chat() {
             setIsMuted(true);
         });
 
-        socketRef.current.on('new_producer', async (data: { producerId: string, socketId: string, email: string }) => {
+        socketRef.current.on('new_producer', async (data: { producerId: string, socketId: string, email: string, roomId?: string }) => {
             if (!msClientRef.current || !socketRef.current) return;
             // Ensure device is initialized before handling new producers
             if (!msClientRef.current.isLoaded()) return;
             // Ignore ourselves
             if (data.socketId === socketRef.current.id) return;
+            // If roomId provided, ensure we are in the same room
+            if (data.roomId && msClientRef.current.roomId !== data.roomId) return;
 
             try {
                 const recvTransport = await getOrCreateRecvTransport(msClientRef.current);
                 const consumer = await msClientRef.current.consume(recvTransport, data.producerId);
 
+                const handleProducerClose = () => {
+                    console.log('Consumer producerclose event triggered');
+                    setRemoteStreams(prev => {
+                        const existing = prev.find(s => s.socketId === data.socketId);
+                        if (!existing) return prev;
+
+                        existing.stream.removeTrack(consumer.track);
+                        const remainingTracks = existing.stream.getTracks();
+
+                        if (remainingTracks.length === 0) {
+                            return prev.filter(s => s.socketId !== data.socketId);
+                        } else {
+                            // Create a new stream object to trigger re-renders
+                            return prev.map(s => s.socketId === data.socketId 
+                                ? { ...s, stream: new MediaStream(remainingTracks) } 
+                                : s
+                            );
+                        }
+                    });
+                    consumer.close();
+                };
+
+                consumer.on('producerclose', handleProducerClose);
+                consumer.on('transportclose', handleProducerClose);
+
                 setRemoteStreams(prev => {
-                    const existingIndex = prev.findIndex(s => s.socketId === data.socketId);
-                    if (existingIndex !== -1) {
-                        const updated = [...prev];
-                        updated[existingIndex].stream.addTrack(consumer.track);
-                        return [...updated];
+                    const existing = prev.find(s => s.socketId === data.socketId);
+                    if (existing) {
+                        // Check if track already exists to avoid duplicates
+                        const hasTrack = existing.stream.getTracks().find(t => t.id === consumer.track.id);
+                        if (!hasTrack) {
+                            // Create NEW stream with all existing tracks plus the new one
+                            const newTracks = [...existing.stream.getTracks(), consumer.track];
+                            return prev.map(s => s.socketId === data.socketId 
+                                ? { ...s, stream: new MediaStream(newTracks) } 
+                                : s
+                            );
+                        }
+                        return prev;
                     } else {
                         const newStream = new MediaStream([consumer.track]);
                         return [...prev, { socketId: data.socketId, email: data.email, stream: newStream }];
@@ -326,9 +365,11 @@ export function Chat() {
             alert(`${data.declinerEmail.split('@')[0]} declined your private audio request`);
         });
 
-        socketRef.current.on('new_private_producer', async (data: { producerId: string, socketId: string, email: string }) => {
+        socketRef.current.on('new_private_producer', async (data: { producerId: string, socketId: string, email: string, roomId?: string }) => {
             console.log('New private producer from:', data.email);
             if (!msClientRef.current || !privateRecvTransportRef.current) return;
+            // If roomId provided, ensure we are in the same room
+            if (data.roomId && msClientRef.current.roomId !== data.roomId) return;
             
             try {
                 const consumer = await msClientRef.current.consume(privateRecvTransportRef.current, data.producerId);
@@ -570,16 +611,44 @@ export function Chat() {
 
                     try {
                         const consumer = await msClientRef.current.consume(recvTransport, p.producerId);
-                        setRemoteStreams(prev => {
-                            const existingIndex = prev.findIndex(s => s.socketId === p.socketId);
-                            if (existingIndex !== -1) {
-                                const updated = [...prev];
-                                // Check if track already exists to avoid duplicates
-                                const hasTrack = updated[existingIndex].stream.getTracks().find(t => t.id === consumer.track.id);
-                                if (!hasTrack) {
-                                    updated[existingIndex].stream.addTrack(consumer.track);
+
+                        const handleProducerClose = () => {
+                            console.log('Consumer producerclose event triggered');
+                            setRemoteStreams(prev => {
+                                const existing = prev.find(s => s.socketId === p.socketId);
+                                if (!existing) return prev;
+
+                                existing.stream.removeTrack(consumer.track);
+                                const remainingTracks = existing.stream.getTracks();
+
+                                if (remainingTracks.length === 0) {
+                                    return prev.filter(s => s.socketId !== p.socketId);
+                                } else {
+                                    return prev.map(s => s.socketId === p.socketId 
+                                        ? { ...s, stream: new MediaStream(remainingTracks) } 
+                                        : s
+                                    );
                                 }
-                                return [...updated];
+                            });
+                            consumer.close();
+                        };
+
+                        consumer.on('producerclose', handleProducerClose);
+                        consumer.on('transportclose', handleProducerClose);
+
+                        setRemoteStreams(prev => {
+                            const existing = prev.find(s => s.socketId === p.socketId);
+                            if (existing) {
+                                // Check if track already exists to avoid duplicates
+                                const hasTrack = existing.stream.getTracks().find(t => t.id === consumer.track.id);
+                                if (!hasTrack) {
+                                    const newTracks = [...existing.stream.getTracks(), consumer.track];
+                                    return prev.map(s => s.socketId === p.socketId 
+                                        ? { ...s, stream: new MediaStream(newTracks) } 
+                                        : s
+                                    );
+                                }
+                                return prev;
                             } else {
                                 const newStream = new MediaStream([consumer.track]);
                                 return [...prev, { socketId: p.socketId, email: p.email, stream: newStream }];
@@ -641,6 +710,7 @@ export function Chat() {
         setCallStatus('idle');
         setIncomingCall(null);
         setIncomingGroupCall(null);
+        setCallRemoteSocketId(null);
         setRemoteStreams([]);
         setCallParticipants([]);
         setLocalStream(prev => {
@@ -670,6 +740,8 @@ export function Chat() {
         const syncVideo = async () => {
             if (isVideoOff) {
                 if (videoProducerRef.current) {
+                    const producerId = videoProducerRef.current.id;
+                    await msClientRef.current?.closeProducer(producerId);
                     videoProducerRef.current.close();
                     videoProducerRef.current = null;
                 }
@@ -705,6 +777,8 @@ export function Chat() {
         const syncAudio = async () => {
             if (isMuted) {
                 if (audioProducerRef.current) {
+                    const producerId = audioProducerRef.current.id;
+                    await msClientRef.current?.closeProducer(producerId);
                     audioProducerRef.current.close();
                     audioProducerRef.current = null;
                 }
@@ -1049,7 +1123,13 @@ export function Chat() {
                     onMuteAll={handleMuteAll}
                     participants={[
                         ...(currentUser ? [{ socketId: socketRef.current?.id || 'me', email: currentUser.email }] : []),
-                        ...callParticipants
+                        // Filtering out 'me' from callParticipants just to be very safe
+                        ...callParticipants.filter(p => p.socketId !== (socketRef.current?.id || 'me')),
+                        ...(callRemoteSocketId && 
+                            !callParticipants.find(p => p.socketId === callRemoteSocketId) && 
+                            callRemoteSocketId !== (socketRef.current?.id || 'me')
+                            ? [{ socketId: callRemoteSocketId, email: callRemoteEmail }] 
+                            : [])
                     ]}
                     hostSocketId={
                         // We need the socketId of the admin. This requires the admin to have joined correctly.

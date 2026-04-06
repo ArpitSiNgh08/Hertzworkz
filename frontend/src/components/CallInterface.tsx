@@ -115,6 +115,61 @@ function ParticipantsSidebar({
     );
 }
 
+function RemoteVideo({ stream, socketId, email, hasVideo, isGroupCall, isHost, onMuteParticipant }: { 
+    stream: MediaStream | undefined, 
+    socketId: string, 
+    email: string, 
+    hasVideo: boolean,
+    isGroupCall: boolean,
+    isHost: boolean,
+    onMuteParticipant: (id: string) => void
+}) {
+    const videoRef = useRef<HTMLVideoElement>(null);
+
+    useEffect(() => {
+        if (videoRef.current && stream) {
+            videoRef.current.srcObject = stream;
+        } else if (videoRef.current) {
+            videoRef.current.srcObject = null;
+        }
+    }, [stream]);
+
+    return (
+        <div className="relative w-full h-full min-h-[200px] bg-zinc-900 rounded-3xl overflow-hidden border border-white/5 shadow-2xl group transition-all hover:scale-[1.02]">
+            <video
+                ref={videoRef}
+                autoPlay
+                playsInline
+                className="w-full h-full object-cover"
+            />
+            {!hasVideo && (
+                <div className="absolute inset-0 bg-zinc-900 flex flex-col items-center justify-center gap-4">
+                    <div className="w-20 h-20 rounded-full bg-rose-500/10 flex items-center justify-center text-rose-500 border border-rose-500/20 shadow-xl shadow-rose-500/5">
+                        <User size={32} />
+                    </div>
+                    <p className="text-zinc-500 text-sm font-medium">Participant hasn&apos;t turned on video</p>
+                </div>
+            )}
+            <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
+            <div className="absolute bottom-4 left-4 right-4 flex items-center justify-between">
+                <div className="px-3 py-1.5 bg-black/40 backdrop-blur-md text-white rounded-xl flex items-center gap-2 border border-white/10">
+                    <div className={`w-2 h-2 rounded-full ${stream ? 'bg-green-500 animate-pulse' : 'bg-zinc-600'}`} />
+                    <span className="text-xs font-semibold">{email?.split('@')[0] || 'Remote'}</span>
+                </div>
+                {isGroupCall && isHost && (
+                    <button
+                        onClick={() => onMuteParticipant(socketId)}
+                        className="p-2 bg-rose-500/80 hover:bg-rose-600 text-white rounded-xl backdrop-blur-md transition-all transform hover:scale-110"
+                        title="Mute Participant"
+                    >
+                        <MicOff size={16} />
+                    </button>
+                )}
+            </div>
+        </div>
+    );
+}
+
 export function CallInterface({
     status,
     remoteUserEmail,
@@ -164,8 +219,6 @@ export function CallInterface({
         }
     }, [localStream, status]);
 
-
-
     if (status === 'ended' || status === 'declined') return null;
     if (!mounted) return null;
 
@@ -205,10 +258,8 @@ export function CallInterface({
 
     return createPortal((
         <div className="fixed inset-0 z-[200] bg-zinc-950 flex flex-col items-center justify-center overflow-hidden font-sans">
-            {/* Background blur/gradient */}
             <div className="absolute inset-0 bg-gradient-to-b from-rose-900/20 via-zinc-950 to-zinc-950" />
 
-            {/* Private audio incoming request notification */}
             {pendingPrivateRequest && (
                 <div className="fixed top-6 left-1/2 -translate-x-1/2 z-[350] w-96 bg-zinc-900 border border-emerald-500/30 rounded-2xl shadow-2xl p-4 flex flex-col gap-4 animate-in slide-in-from-top duration-500">
                     <div className="flex items-center gap-3">
@@ -227,7 +278,6 @@ export function CallInterface({
                 </div>
             )}
 
-            {/* Private session active banner */}
             {activePrivateSession && (
                 <div className="absolute top-6 left-1/2 -translate-x-1/2 z-[220] flex items-center gap-3 px-5 py-3 bg-emerald-500/10 border border-emerald-500/30 rounded-2xl backdrop-blur-md animate-in slide-in-from-top duration-500">
                     <Lock size={18} className="text-emerald-400" />
@@ -240,7 +290,6 @@ export function CallInterface({
                 </div>
             )}
 
-            {/* Remote Video / Primary Display */}
             <div className="relative w-full h-full flex items-center justify-center p-4">
                 {status === 'connected' ? (
                     <div className={`grid gap-4 w-full h-full max-w-7xl mx-auto transition-all duration-500 ${
@@ -251,44 +300,21 @@ export function CallInterface({
                     }`}>
                         {participants.filter(p => p.socketId !== mySocketId).map((p) => {
                             const remoteItem = remoteStreams.find(s => s.socketId === p.socketId);
-                            const hasVideo = remoteItem && remoteItem.stream.getVideoTracks().length > 0;
+                            const hasVideo = !!(remoteItem && remoteItem.stream.getVideoTracks().length > 0);
 
                             return (
-                                <div key={p.socketId} className="relative w-full h-full min-h-[200px] bg-zinc-900 rounded-3xl overflow-hidden border border-white/5 shadow-2xl group transition-all hover:scale-[1.02]">
-                                    <video
-                                        ref={(el) => { if (el && remoteItem) el.srcObject = remoteItem.stream; }}
-                                        autoPlay
-                                        playsInline
-                                        className="w-full h-full object-cover"
-                                    />
-                                    {!hasVideo && (
-                                        <div className="absolute inset-0 bg-zinc-900 flex flex-col items-center justify-center gap-4">
-                                            <div className="w-20 h-20 rounded-full bg-rose-500/10 flex items-center justify-center text-rose-500 border border-rose-500/20 shadow-xl shadow-rose-500/5">
-                                                <User size={32} />
-                                            </div>
-                                            <p className="text-zinc-500 text-sm font-medium">Participant hasn&apos;t turned on video</p>
-                                        </div>
-                                    )}
-                                    <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
-                                    <div className="absolute bottom-4 left-4 right-4 flex items-center justify-between">
-                                        <div className="px-3 py-1.5 bg-black/40 backdrop-blur-md text-white rounded-xl flex items-center gap-2 border border-white/10">
-                                            <div className={`w-2 h-2 rounded-full ${remoteItem ? 'bg-green-500 animate-pulse' : 'bg-zinc-600'}`} />
-                                            <span className="text-xs font-semibold">{p.email?.split('@')[0] || 'Remote'}</span>
-                                        </div>
-                                        {isGroupCall && isHost && (
-                                            <button
-                                                onClick={() => onMuteParticipant(p.socketId)}
-                                                className="p-2 bg-rose-500/80 hover:bg-rose-600 text-white rounded-xl backdrop-blur-md transition-all transform hover:scale-110"
-                                                title="Mute Participant"
-                                            >
-                                                <MicOff size={16} />
-                                            </button>
-                                        )}
-                                    </div>
-                                </div>
+                                <RemoteVideo 
+                                    key={p.socketId}
+                                    stream={remoteItem?.stream}
+                                    socketId={p.socketId}
+                                    email={p.email}
+                                    hasVideo={hasVideo}
+                                    isGroupCall={isGroupCall}
+                                    isHost={isHost}
+                                    onMuteParticipant={onMuteParticipant}
+                                />
                             );
                         })}
-                        {/* Fallback if alone in group call */}
                         {isGroupCall && participants.filter(p => p.socketId !== mySocketId).length === 0 && (
                             <div className="flex flex-col items-center gap-6 animate-in fade-in duration-500">
                                 <div className="w-24 h-24 rounded-full bg-zinc-900 border border-white/10 flex items-center justify-center text-zinc-500 shadow-2xl">
@@ -323,7 +349,6 @@ export function CallInterface({
                     </div>
                 )}
 
-                {/* Local Preview (Picture-in-Picture) */}
                 {(status === 'connected' || status === 'dialing') && (
                     <div className="absolute top-6 right-6 w-48 aspect-video bg-zinc-900 rounded-2xl overflow-hidden shadow-2xl border border-white/10 z-50 transform transition-all hover:scale-105">
                         <video
@@ -345,7 +370,6 @@ export function CallInterface({
                 )}
             </div>
 
-            {/* Controls */}
             <div className="absolute bottom-12 z-50 flex items-center gap-6 px-8 py-4 bg-zinc-900/40 backdrop-blur-2xl rounded-3xl border border-white/5 shadow-2xl animate-in slide-in-from-bottom-12 duration-700">
                 {status === 'dialing' || status === 'connected' ? (
                     <>
