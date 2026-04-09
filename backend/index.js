@@ -137,7 +137,8 @@ io.on('connection', (socket) => {
         // Emit to the caller BEFORE the receiver joins the room
         io.to(data.callerId).emit('call_accepted', {
             receiverId: data.receiverId,
-            receiverSocketId: socket.id
+            receiverSocketId: socket.id,
+            roomId: data.callerId
         });
 
         // Ensure the receiver joins the caller's room for SFU signaling
@@ -170,18 +171,28 @@ io.on('connection', (socket) => {
     socket.on('end_call', (data) => {
         // data: { toId, fromId, groupId }
         console.log(`Call ended by ${data.fromId} in ${data.groupId ? 'group ' + data.groupId : 'direct call'}`);
+        
+        // Clean up mediasoup resources for this user to prevent orphaned transports crashing future calls
+        const { closeTransportsBySocketId } = require('./mediasoup/sfu');
+        closeTransportsBySocketId(socket.id);
+
         if (data.groupId) {
             // For group calls, notifying others that someone left
             socket.to(data.groupId).emit('participant_left_call', {
                 fromId: data.fromId,
                 groupId: data.groupId
             });
-        } else {
+        } else if (data.toId) {
             // For 1-on-1 calls, the whole call ends
             io.to(data.toId).emit('call_ended', {
                 fromId: data.fromId
             });
         }
+    });
+
+    socket.on('leave_meeting', () => {
+        const { closeTransportsBySocketId } = require('./mediasoup/sfu');
+        closeTransportsBySocketId(socket.id);
     });
 
     // Mediasoup Signaling
@@ -204,12 +215,19 @@ io.on('connection', (socket) => {
     socket.on('createWebRtcTransport', async (data, callback) => {
         try {
             const roomId = data.roomId || 'default';
-            // Pass socket.id to associate the transport with this user
-            const transportParams = await createWebRtcTransport(roomId, socket.id);
-            callback(transportParams);
+            // Pass socket.id and socket.email to associate the transport with this user
+            const transportParams = await createWebRtcTransport(roomId, socket.id, socket.email);
+            
+            // Notify others in the room that a participant has joined the SFU session
+            socket.to(roomId).emit('participant_joined', {
+                 socketId: socket.id,
+                 email: socket.email || 'Unknown'
+            });
+
+            if (typeof callback === 'function') callback(transportParams);
         } catch (error) {
             console.error('createWebRtcTransport error:', error);
-            callback({ error: error.message });
+            if (typeof callback === 'function') callback({ error: error.message });
         }
     });
 
@@ -279,18 +297,23 @@ io.on('connection', (socket) => {
                 const producer = room.producers.get(producerId);
                 // Ensure only the owner can close their producer
                 if (producer && producer.appData.socketId === socket.id) {
+                    const kind = producer.kind;
                     producer.close();
                     room.producers.delete(producerId);
-                    callback({ success: true });
+                    
+                    // Tell others that this producer was closed
+                    socket.to(roomId).emit('producer_closed', { producerId, socketId: socket.id, kind });
+
+                    if (typeof callback === 'function') callback({ success: true });
                 } else {
-                    callback({ error: 'Producer not found or unauthorized' });
+                    if (typeof callback === 'function') callback({ error: 'Producer not found or unauthorized' });
                 }
             } else {
-                callback({ error: 'Room not found' });
+                if (typeof callback === 'function') callback({ error: 'Room not found' });
             }
         } catch (error) {
             console.error('close_producer error:', error);
-            callback({ error: error.message });
+            if (typeof callback === 'function') callback({ error: error.message });
         }
     });
 
@@ -385,21 +408,11 @@ io.on('connection', (socket) => {
             // We can get participants from the active transports in the room
             const participantsMap = new Map();
             
-            // Add self to the list if in room? No, client knows self.
-            
             for (const [id, transport] of room.transports) {
                 const sId = transport.appData.socketId;
                 if (sId && sId !== socket.id) {
-                    // Try to find the email from any producer this socket has
-                    let email = 'Unknown';
-                    for (const [pId, producer] of room.producers) {
-                        if (producer.appData.socketId === sId) {
-                            email = producer.appData.email;
-                            break;
-                        }
-                    }
-                    // If no email found in producers, we might need another way to store it.
-                    // For now, let's just use what we have.
+                    // Read email directly from transport appData
+                    const email = transport.appData.email || 'Unknown';
                     participantsMap.set(sId, { socketId: sId, email: email });
                 }
             }

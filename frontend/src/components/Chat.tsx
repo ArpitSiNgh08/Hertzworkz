@@ -29,7 +29,13 @@ interface Message {
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:5000';
 
-export function Chat() {
+interface ChatProps {
+    initialMeetingId?: string;
+    onLeave?: () => void;
+    mode?: 'chat' | 'meeting';
+}
+
+export function Chat({ initialMeetingId, onLeave, mode = 'chat' }: ChatProps) {
     const [users, setUsers] = useState<User[]>([]);
     const [groups, setGroups] = useState<Group[]>([]);
     const [selectedUser, setSelectedUser] = useState<User | null>(null);
@@ -80,6 +86,7 @@ export function Chat() {
     const sendTransportRef = useRef<any>(null);
     const videoProducerRef = useRef<any>(null);
     const audioProducerRef = useRef<any>(null);
+    const sfuReadyRef = useRef<boolean>(false);
     const creatingRecvTransportRef = useRef<Promise<any> | null>(null);
 
     const getOrCreateRecvTransport = async (client: MediasoupClient) => {
@@ -94,60 +101,27 @@ export function Chat() {
     };
 
     useEffect(() => {
-        // Load current user from localStorage
         const userStr = localStorage.getItem('user');
         if (userStr) {
             const user = JSON.parse(userStr);
-            setCurrentUser(user);
+            setCurrentUser({ id: user.id || user._id, email: user.email });
         }
 
-        // Fetch users from backend
-        const fetchUsers = async () => {
-            try {
-                const response = await fetch(`${BACKEND_URL}/api/auth/users`);
-                const data = await response.json();
-                setUsers(data);
-            } catch (error) {
-                console.error('Error fetching users:', error);
-            }
-        };
-
-        fetchUsers();
-    }, []);
-
-    useEffect(() => {
-        const fetchGroups = async () => {
-            if (currentUser) {
-                try {
-                    const response = await fetch(`${BACKEND_URL}/api/groups/user/${currentUser.id}`);
-                    const data = await response.json();
-                    setGroups(data);
-                } catch (error) {
-                    console.error('Error fetching groups:', error);
-                }
-            }
-        };
-
-        if (currentUser) {
-            fetchGroups();
-        }
-    }, [currentUser]);
-
-    useEffect(() => {
-        if (!currentUser) return;
-
-        // Connect to Socket.io
-        socketRef.current = io(BACKEND_URL);
+        const token = localStorage.getItem('token');
+        socketRef.current = io(BACKEND_URL, {
+            auth: { token }
+        });
 
         socketRef.current.on('connect', () => {
             console.log('Connected to socket server');
-            socketRef.current?.emit('join', { userId: currentUser.id, email: currentUser.email });
+            if (currentUser) {
+                 socketRef.current?.emit('join', { userId: currentUser.id, email: currentUser.email });
+            }
         });
 
         socketRef.current.on('receive_message', (data: Message) => {
             const currentSelectedUser = selectedUserRef.current;
             const currentSelectedGroup = selectedGroupRef.current;
-
             if (currentSelectedUser && (data.sender === currentSelectedUser._id || (typeof data.sender === 'object' && data.sender._id === currentSelectedUser._id)) && !data.groupId) {
                 setMessages(prev => [...prev, data]);
             } else if (currentSelectedGroup && data.groupId === currentSelectedGroup._id) {
@@ -155,260 +129,121 @@ export function Chat() {
             }
         });
 
-        socketRef.current.on('incoming_call', (data: { callerId: string, callerEmail: string, callerSocketId: string }) => {
-            console.log('Global incoming call received:', data);
-            setIncomingCall(data);
+        socketRef.current.on('incoming_call', (data) => {
+            setIncomingCall({ callerId: data.callerId, callerEmail: data.callerEmail });
             setCallStatus('ringing');
             setCallRemoteEmail(data.callerEmail);
-            setCallRemoteSocketId(data.callerSocketId);
         });
 
-        socketRef.current.on('incoming_group_call', (data: { callerId: string, callerEmail: string, groupId: string, groupName: string }) => {
-            console.log('Global incoming group call received:', data);
+        socketRef.current.on('incoming_group_call', (data) => {
             setIncomingGroupCall(data);
             setCallStatus('ringing');
-            setCallRemoteEmail(`${data.groupName} (Group)`);
+            setCallRemoteEmail(data.groupName || data.groupId);
         });
 
-        socketRef.current.on('call_accepted', async (data: { receiverId: string, receiverSocketId: string }) => {
-            // Only the actual Caller should react to this event to spawn the Caller's SFU perspective
-            // We know we are the caller if the emitted receiverId matches the user we are currently trying to call
-            if (selectedUserRef.current?._id === data.receiverId) {
-                setCallStatus('connected');
-                setCallRemoteSocketId(data.receiverSocketId);
-                if (currentUser?.id) {
-                    startSfuSession(currentUser.id);
-                }
-            }
+        socketRef.current.on('call_accepted', (data) => {
+            setCallStatus('connected');
+            setCallRemoteSocketId(data.receiverSocketId);
+            startSfuSession(data.roomId);
         });
 
-        socketRef.current.on('group_participant_joined', (data: { userId: string, socketId: string, email: string }) => {
-            console.log('Group participant joined call:', data.socketId);
+        socketRef.current.on('producer_closed', (data) => {
+            if (!msClientRef.current) return;
+            setRemoteStreams(prev => {
+                return prev.map(s => {
+                    if (s.socketId === data.socketId) {
+                        const tracks = s.stream.getTracks().filter(t => t.kind !== data.kind);
+                        return { ...s, stream: new MediaStream(tracks) };
+                    }
+                    return s;
+                });
+            });
+        });
+
+        socketRef.current.on('participant_joined', (data) => {
             setCallParticipants(prev => {
-                const exists = prev.find(p => p.socketId === data.socketId);
-                if (exists) return prev;
-                return [...prev, { socketId: data.socketId, email: data.email }];
+                if (!prev.find(p => p.socketId === data.socketId)) {
+                    return [...prev, { socketId: data.socketId, email: data.email }];
+                }
+                return prev;
             });
         });
 
-        socketRef.current.on('call_declined', (data: { receiverId: string }) => {
-            setCallStatus('idle');
-            setIncomingCall(null);
+        socketRef.current.on('call_ended', () => {
+            handleEndCall();
         });
 
-        socketRef.current.on('call_ended', (data: { fromId: string, groupId?: string }) => {
-            // This event now ONLY means a 1-on-1 call ended
-            console.log('Call ended (1-on-1):', data);
-            setCallStatus('idle');
-            setIncomingCall(null);
-            setIncomingGroupCall(null);
-            setRemoteStreams([]);
-            setCallParticipants([]);
-            setCallRemoteSocketId(null);
-            setLocalStream(prev => {
-                if (prev) prev.getTracks().forEach(t => t.stop());
-                return null;
-            });
-            if (videoProducerRef.current) videoProducerRef.current.close();
-            if (audioProducerRef.current) audioProducerRef.current.close();
-            if (sendTransportRef.current) sendTransportRef.current.close();
-            if (recvTransportRef.current) recvTransportRef.current.close();
-            videoProducerRef.current = null;
-            audioProducerRef.current = null;
-            sendTransportRef.current = null;
-            recvTransportRef.current = null;
+        socketRef.current.on('new_producer', async (data) => {
+            // Check msClientRef to ensure we are in a call, bypassing stale React closure
             if (msClientRef.current) {
-                msClientRef.current.close();
-                msClientRef.current = null;
-            }
-        });
+                // Wait for SFU init if concurrent (avoids Device Not Initialized drops)
+                let waitStats = 0;
+                while (!sfuReadyRef.current && waitStats < 50) {
+                    await new Promise(r => setTimeout(r, 100));
+                    waitStats++;
+                }
+                if (!sfuReadyRef.current) return;
 
-        socketRef.current.on('participant_left_call', (data: { fromId: string, groupId: string }) => {
-            console.log('Participant left group call:', data.fromId);
-            setRemoteStreams(prev => prev.filter(s => s.socketId !== data.fromId));
-            setCallParticipants(prev => prev.filter(p => p.socketId !== data.fromId));
-        });
-
-        socketRef.current.on('mute_local_audio', () => {
-            console.log('You have been muted by the host');
-            setIsMuted(true);
-        });
-
-        socketRef.current.on('new_producer', async (data: { producerId: string, socketId: string, email: string, roomId?: string }) => {
-            if (!msClientRef.current || !socketRef.current) return;
-            // Ensure device is initialized before handling new producers
-            if (!msClientRef.current.isLoaded()) return;
-            // Ignore ourselves
-            if (data.socketId === socketRef.current.id) return;
-            // If roomId provided, ensure we are in the same room
-            if (data.roomId && msClientRef.current.roomId !== data.roomId) return;
-
-            try {
-                const recvTransport = await getOrCreateRecvTransport(msClientRef.current);
-                const consumer = await msClientRef.current.consume(recvTransport, data.producerId);
-
-                const handleProducerClose = () => {
-                    console.log('Consumer producerclose event triggered');
+                setCallParticipants(prev => {
+                    if (!prev.find(p => p.socketId === data.socketId)) {
+                        return [...prev, { socketId: data.socketId, email: data.email }];
+                    }
+                    return prev;
+                });
+                const recvTransport = await getOrCreateRecvTransport(msClientRef.current!);
+                try {
+                    const consumer = await msClientRef.current!.consume(recvTransport, data.producerId);
+                    const handleClose = () => {
+                        setRemoteStreams(prev => {
+                            const existing = prev.find(s => s.socketId === data.socketId);
+                            if (!existing) return prev;
+                            existing.stream.removeTrack(consumer.track);
+                            const rem = existing.stream.getTracks();
+                            if (rem.length === 0) return prev.filter(s => s.socketId !== data.socketId);
+                            return prev.map(s => s.socketId === data.socketId ? { ...s, stream: new MediaStream(rem) } : s);
+                        });
+                        consumer.close();
+                    };
+                    consumer.on('producerclose', handleClose);
+                    consumer.on('transportclose', handleClose);
                     setRemoteStreams(prev => {
                         const existing = prev.find(s => s.socketId === data.socketId);
-                        if (!existing) return prev;
-
-                        existing.stream.removeTrack(consumer.track);
-                        const remainingTracks = existing.stream.getTracks();
-
-                        if (remainingTracks.length === 0) {
-                            return prev.filter(s => s.socketId !== data.socketId);
-                        } else {
-                            // Create a new stream object to trigger re-renders
-                            return prev.map(s => s.socketId === data.socketId 
-                                ? { ...s, stream: new MediaStream(remainingTracks) } 
-                                : s
-                            );
+                        if (existing) {
+                            const hasTrack = existing.stream.getTracks().find(t => t.id === consumer.track.id);
+                            if (!hasTrack) return prev.map(s => s.socketId === data.socketId ? { ...s, stream: new MediaStream([...existing.stream.getTracks(), consumer.track]) } : s);
+                            return prev;
                         }
+                        return [...prev, { socketId: data.socketId, email: data.email, stream: new MediaStream([consumer.track]) }];
                     });
-                    consumer.close();
-                };
-
-                consumer.on('producerclose', handleProducerClose);
-                consumer.on('transportclose', handleProducerClose);
-
-                setRemoteStreams(prev => {
-                    const existing = prev.find(s => s.socketId === data.socketId);
-                    if (existing) {
-                        // Check if track already exists to avoid duplicates
-                        const hasTrack = existing.stream.getTracks().find(t => t.id === consumer.track.id);
-                        if (!hasTrack) {
-                            // Create NEW stream with all existing tracks plus the new one
-                            const newTracks = [...existing.stream.getTracks(), consumer.track];
-                            return prev.map(s => s.socketId === data.socketId 
-                                ? { ...s, stream: new MediaStream(newTracks) } 
-                                : s
-                            );
-                        }
-                        return prev;
-                    } else {
-                        const newStream = new MediaStream([consumer.track]);
-                        return [...prev, { socketId: data.socketId, email: data.email, stream: newStream }];
-                    }
-                });
-            } catch (error) {
-                console.error('Error consuming new producer:', error);
+                } catch (e) { console.error(e); }
             }
         });
 
-        socketRef.current.on('participant_left', (data: { socketId: string }) => {
-            console.log('Participant left:', data.socketId);
+        socketRef.current.on('participant_left', (data) => {
+            if (!msClientRef.current) return;
             setRemoteStreams(prev => prev.filter(s => s.socketId !== data.socketId));
             setCallParticipants(prev => prev.filter(p => p.socketId !== data.socketId));
         });
 
-        socketRef.current.on('group_created', async (data: { groupId: string }) => {
-            console.log('Joined new group room:', data.groupId);
-            socketRef.current?.emit('join_group', data.groupId);
-
-            // Re-fetch groups to show the new group in the list
-            try {
-                const response = await fetch(`${BACKEND_URL}/api/groups/user/${currentUser.id}`);
-                const groupsData = await response.json();
-                setGroups(groupsData);
-            } catch (error) {
-                console.error('Error fetching groups:', error);
-            }
+        socketRef.current.on('participants_update', (data) => {
+            setCallParticipants(data.participants);
         });
 
-        socketRef.current.on('incoming_private_audio_request', (data: { requesterSocketId: string, requesterEmail: string, roomId: string }) => {
-            console.log('Incoming private audio request from:', data.requesterEmail);
-            setPendingPrivateRequest({ requesterSocketId: data.requesterSocketId, requesterEmail: data.requesterEmail });
-        });
-
-        socketRef.current.on('private_audio_accepted', async (data: { partnerSocketId: string, partnerEmail: string }) => {
-            console.log('Private audio accepted by:', data.partnerEmail);
-            setActivePrivateSession({ socketId: data.partnerSocketId, email: data.partnerEmail });
-            setPendingPrivateRequest(null);
-
-            // Mute the group audio track
-            if (localStream) {
-                localStream.getAudioTracks().forEach(t => t.enabled = false);
-            }
-
-            // Full mediasoup private transport setup
-            if (!msClientRef.current || !socketRef.current) return;
-            const roomId = selectedGroup?._id || incomingGroupCall?.groupId;
-            if (!roomId) return;
-
-            try {
-                // 1. Setup private send transport
-                const pSendTransport = await msClientRef.current.createSendTransport();
-                setPrivateSendTransport(pSendTransport);
-                privateSendTransportRef.current = pSendTransport;
-
-                // Get user media specifically for private audio (or reuse existing)
-                const pStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                privateAudioStreamRef.current = pStream;
-
-                await pSendTransport.produce({ 
-                    track: pStream.getAudioTracks()[0],
-                    appData: { isPrivate: true, privatePartnerSocketId: data.partnerSocketId }
-                });
-
-                // 2. Setup private recv transport
-                const pRecvTransport = await msClientRef.current.createRecvTransport();
-                setPrivateRecvTransport(pRecvTransport);
-                privateRecvTransportRef.current = pRecvTransport;
-
-            } catch (error) {
-                console.error('Error setting up private audio transport:', error);
-            }
-        });
-
-        socketRef.current.on('private_audio_declined', (data: { declinerEmail: string }) => {
-            alert(`${data.declinerEmail.split('@')[0]} declined your private audio request`);
-        });
-
-        socketRef.current.on('new_private_producer', async (data: { producerId: string, socketId: string, email: string, roomId?: string }) => {
-            console.log('New private producer from:', data.email);
-            if (!msClientRef.current || !privateRecvTransportRef.current) return;
-            // If roomId provided, ensure we are in the same room
-            if (data.roomId && msClientRef.current.roomId !== data.roomId) return;
-            
-            try {
-                const consumer = await msClientRef.current.consume(privateRecvTransportRef.current, data.producerId);
-                setRemotePrivateStream(new MediaStream([consumer.track]));
-            } catch (error) {
-                console.error('Error consuming private producer:', error);
-            }
-        });
-
-        socketRef.current.on('private_audio_ended', (data: { endedBySocketId: string }) => {
-            console.log('Private audio ended by:', data.endedBySocketId);
-            setActivePrivateSession(null);
-            setRemotePrivateStream(null);
-            // Re-enable group audio
-            if (localStream) {
-                localStream.getAudioTracks().forEach(t => {
-                    t.enabled = !isMuted;
-                });
-            }
-            // Cleanup transports via refs to avoid stale closure
-            if (privateSendTransportRef.current) privateSendTransportRef.current.close();
-            if (privateRecvTransportRef.current) privateRecvTransportRef.current.close();
-            privateSendTransportRef.current = null;
-            privateRecvTransportRef.current = null;
-            setPrivateSendTransport(null);
-            setPrivateRecvTransport(null);
-            if (privateAudioStreamRef.current) {
-                privateAudioStreamRef.current.getTracks().forEach(t => t.stop());
-                privateAudioStreamRef.current = null;
-            }
-        });
+        if (initialMeetingId) {
+            setCallStatus('connected');
+            startSfuSession(initialMeetingId);
+        }
 
         return () => {
-            if (videoProducerRef.current) videoProducerRef.current.close();
-            if (audioProducerRef.current) audioProducerRef.current.close();
-            if (sendTransportRef.current) sendTransportRef.current.close();
-            if (recvTransportRef.current) recvTransportRef.current.close();
             socketRef.current?.disconnect();
+            if (msClientRef.current) msClientRef.current.close();
         };
+    }, []);
+
+    useEffect(() => {
+        if (currentUser && socketRef.current) {
+            socketRef.current.emit('join', { userId: currentUser.id, email: currentUser.email });
+        }
     }, [currentUser]);
 
     useEffect(() => {
@@ -420,689 +255,294 @@ export function Chat() {
                         url = `${BACKEND_URL}/api/chat/messages/${currentUser.id}/${selectedUser._id}`;
                     } else if (selectedGroup) {
                         url = `${BACKEND_URL}/api/groups/${selectedGroup._id}/messages`;
-                    } else {
-                        return;
-                    }
-
-                    const response = await fetch(url);
-                    const data = await response.json();
+                    } else return;
+                    const res = await fetch(url);
+                    const data = await res.json();
                     setMessages(data);
-                } catch (error) {
-                    console.error('Error fetching messages:', error);
-                }
+                } catch (e) { console.error(e); }
             }
         };
-
         fetchMessages();
     }, [selectedUser, selectedGroup, currentUser]);
 
     useEffect(() => {
-        if (scrollRef.current) {
-            scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-        }
-    }, [messages]);
-
-    const handleSendMessage = async (e: React.FormEvent) => {
-        e.preventDefault();
-        if (!newMessage.trim() || !currentUser || (!selectedUser && !selectedGroup)) return;
-
-        const msgData: any = {
-            sender: currentUser.id,
-            text: newMessage.trim()
+        const fetchData = async () => {
+            try {
+                const uRes = await fetch(`${BACKEND_URL}/api/auth/users`);
+                const uData = await uRes.json();
+                setUsers(uData);
+                if (currentUser) {
+                    const gRes = await fetch(`${BACKEND_URL}/api/groups/user/${currentUser.id}`);
+                    const gData = await gRes.json();
+                    setGroups(gData);
+                }
+            } catch (e) { console.error(e); }
         };
-
-        if (selectedUser) {
-            msgData.receiver = selectedUser._id;
-        } else if (selectedGroup) {
-            msgData.groupId = selectedGroup._id;
-        }
-
-        try {
-            const endpoint = `${BACKEND_URL}/api/chat/send`;
-            // We'll use the same send endpoint if it supports groupId, or handle it here
-            const response = await fetch(endpoint, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(msgData)
-            });
-
-            if (response.ok) {
-                const savedMsg = await response.json();
-                socketRef.current?.emit('send_message', savedMsg);
-                setMessages(prev => [...prev, savedMsg]);
-                setNewMessage('');
-            }
-        } catch (error) {
-            console.error('Error sending message:', error);
-        }
-    };
-
-    const handleCreateGroup = async () => {
-        if (!newGroupName.trim() || selectedMembers.length === 0 || !currentUser) return;
-
-        try {
-            const response = await fetch(`${BACKEND_URL}/api/groups/create`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    name: newGroupName,
-                    members: selectedMembers,
-                    createdBy: currentUser.id
-                })
-            });
-
-            if (response.ok) {
-                const newGroup = await response.json();
-                setGroups(prev => [...prev, newGroup]);
-                setShowCreateGroup(false);
-                setNewGroupName('');
-                setSelectedMembers([]);
-
-                // Notify all members via socket
-                socketRef.current?.emit('new_group', {
-                    groupId: newGroup._id,
-                    members: newGroup.members.map((m: any) => typeof m === 'object' ? m._id : m)
-                });
-
-                // Join the room ourselves
-                socketRef.current?.emit('join_group', newGroup._id);
-            }
-        } catch (error) {
-            console.error('Error creating group:', error);
-        }
-    };
-
-    const toggleMemberSelection = (userId: string) => {
-        setSelectedMembers(prev =>
-            prev.includes(userId)
-                ? prev.filter(id => id !== userId)
-                : [...prev, userId]
-        );
-    };
-
-    const handleInitiateCall = () => {
-        if (!currentUser) return;
-
-        if (selectedUser) {
-            setCallStatus('dialing');
-            setCallRemoteEmail(selectedUser.email);
-            socketRef.current?.emit('initiate_call', {
-                callerId: currentUser.id,
-                callerEmail: currentUser.email,
-                receiverId: selectedUser._id
-            });
-        } else if (selectedGroup) {
-            setCallStatus('connected');
-            setCallRemoteEmail(selectedGroup.name);
-            socketRef.current?.emit('initiate_group_call', {
-                callerId: currentUser.id,
-                callerEmail: currentUser.email,
-                groupId: selectedGroup._id,
-                groupName: selectedGroup.name
-            });
-            startSfuSession(selectedGroup._id);
-        }
-    };
+        fetchData();
+    }, [currentUser]);
 
     const startSfuSession = async (roomId: string) => {
-        if (!currentUser || !socketRef.current) return;
-
-        // Clean any leftover stale transport from a previous disconnected call
+        if (!socketRef.current) return;
+        
+        // Clear previous state refs to prevent polluted states across multiple calls
         recvTransportRef.current = null;
         sendTransportRef.current = null;
         videoProducerRef.current = null;
         audioProducerRef.current = null;
+        creatingRecvTransportRef.current = null;
 
-        // Ensure status reflects connected
-        setCallStatus('connected');
+        // Force the socket to join the room on the backend so it receives signaling broadcasts
+        socketRef.current.emit('join_group', roomId);
 
         msClientRef.current = new MediasoupClient(socketRef.current, roomId);
+        sfuReadyRef.current = false;
         const initialized = await msClientRef.current.init();
         if (initialized) {
-            console.log(`SFU is ready for room: ${roomId}`);
+            sfuReadyRef.current = true;
             try {
                 const sendTransport = await msClientRef.current.createSendTransport();
                 sendTransportRef.current = sendTransport;
-
                 const stream = new MediaStream();
                 setLocalStream(stream);
-
-                // Only get and produce if NOT muted/off
                 if (!isVideoOff) {
                     try {
                         const vStream = await navigator.mediaDevices.getUserMedia({ video: true });
-                        const track = vStream.getVideoTracks()[0];
-                        stream.addTrack(track);
+                        stream.addTrack(vStream.getVideoTracks()[0]);
                         videoProducerRef.current = await msClientRef.current.produceVideo(sendTransport, vStream);
-                    } catch (e) {
-                        console.error('Error getting video track:', e);
-                        setIsVideoOff(true);
-                    }
+                    } catch (e) { console.error(e); setIsVideoOff(true); }
                 }
-
                 if (!isMuted) {
                     try {
                         const aStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                        const track = aStream.getAudioTracks()[0];
-                        stream.addTrack(track);
+                        stream.addTrack(aStream.getAudioTracks()[0]);
                         audioProducerRef.current = await msClientRef.current.produceAudio(sendTransport, aStream);
-                    } catch (e) {
-                        console.error('Error getting audio track:', e);
-                        setIsMuted(true);
-                    }
+                    } catch (e) { console.error(e); setIsMuted(true); }
                 }
-
-                const participants = await new Promise<any[]>((resolve) => {
-                    socketRef.current?.emit('get_call_participants', { roomId }, (res: any) => {
-                        resolve(res || []);
-                    });
+                socketRef.current.emit('get_call_participants', { roomId }, (res: any) => {
+                    setCallParticipants(res || []);
                 });
-                setCallParticipants(participants);
-
-                // Now also consume all existing producers in the room
                 const producers = await msClientRef.current.getProducers();
-                console.log('Existing producers:', producers);
-
                 const recvTransport = await getOrCreateRecvTransport(msClientRef.current);
-
                 for (const p of producers) {
-                    // Don't consume ourselves
                     if (p.socketId === socketRef.current.id) continue;
-
                     try {
                         const consumer = await msClientRef.current.consume(recvTransport, p.producerId);
-
-                        const handleProducerClose = () => {
-                            console.log('Consumer producerclose event triggered');
+                        const handleClose = () => {
                             setRemoteStreams(prev => {
-                                const existing = prev.find(s => s.socketId === p.socketId);
-                                if (!existing) return prev;
-
-                                existing.stream.removeTrack(consumer.track);
-                                const remainingTracks = existing.stream.getTracks();
-
-                                if (remainingTracks.length === 0) {
-                                    return prev.filter(s => s.socketId !== p.socketId);
-                                } else {
-                                    return prev.map(s => s.socketId === p.socketId 
-                                        ? { ...s, stream: new MediaStream(remainingTracks) } 
-                                        : s
-                                    );
-                                }
+                                const ex = prev.find(s => s.socketId === p.socketId);
+                                if (!ex) return prev;
+                                ex.stream.removeTrack(consumer.track);
+                                const rem = ex.stream.getTracks();
+                                if (rem.length === 0) return prev.filter(s => s.socketId !== p.socketId);
+                                return prev.map(s => s.socketId === p.socketId ? { ...s, stream: new MediaStream(rem) } : s);
                             });
                             consumer.close();
                         };
-
-                        consumer.on('producerclose', handleProducerClose);
-                        consumer.on('transportclose', handleProducerClose);
-
+                        consumer.on('producerclose', handleClose);
+                        consumer.on('transportclose', handleClose);
                         setRemoteStreams(prev => {
-                            const existing = prev.find(s => s.socketId === p.socketId);
-                            if (existing) {
-                                // Check if track already exists to avoid duplicates
-                                const hasTrack = existing.stream.getTracks().find(t => t.id === consumer.track.id);
-                                if (!hasTrack) {
-                                    const newTracks = [...existing.stream.getTracks(), consumer.track];
-                                    return prev.map(s => s.socketId === p.socketId 
-                                        ? { ...s, stream: new MediaStream(newTracks) } 
-                                        : s
-                                    );
-                                }
-                                return prev;
-                            } else {
-                                const newStream = new MediaStream([consumer.track]);
-                                return [...prev, { socketId: p.socketId, email: p.email, stream: newStream }];
-                            }
+                            const ex = prev.find(s => s.socketId === p.socketId);
+                            if (ex) return prev.map(s => s.socketId === p.socketId ? { ...s, stream: new MediaStream([...ex.stream.getTracks(), consumer.track]) } : s);
+                            return [...prev, { socketId: p.socketId, email: p.email, stream: new MediaStream([consumer.track]) }];
                         });
-                    } catch (err) {
-                        console.error('Error consuming existing producer:', err);
-                    }
+                    } catch (e) { console.error(e); }
                 }
-            } catch (err) {
-                console.error("Error starting production:", err);
-            }
+            } catch (e) { console.error(e); }
         }
     };
 
-    const handleAcceptCall = async () => {
-        if (!currentUser || !socketRef.current) return;
-
+    const handleAcceptCall = () => {
         if (incomingCall) {
             setCallStatus('connected');
-            socketRef.current.emit('accept_call', {
-                callerId: incomingCall.callerId,
-                receiverId: currentUser.id
-            });
+            socketRef.current?.emit('accept_call', { callerId: incomingCall.callerId, receiverId: currentUser?.id });
             startSfuSession(incomingCall.callerId);
+            setIncomingCall(null);
         } else if (incomingGroupCall) {
             setCallStatus('connected');
-            socketRef.current.emit('accept_group_call', {
-                userId: currentUser.id,
-                groupId: incomingGroupCall.groupId
-            });
+            socketRef.current?.emit('accept_group_call', { userId: currentUser?.id, groupId: incomingGroupCall.groupId });
             startSfuSession(incomingGroupCall.groupId);
+            setIncomingGroupCall(null);
         }
     };
 
     const handleDeclineCall = () => {
-        if (incomingCall && currentUser) {
-            socketRef.current?.emit('decline_call', {
-                callerId: incomingCall.callerId,
-                receiverId: currentUser.id
-            });
-        }
         setIncomingCall(null);
         setIncomingGroupCall(null);
         setCallStatus('idle');
     };
 
     const handleEndCall = () => {
-        const toId = incomingCall ? incomingCall.callerId : selectedUser?._id;
-        const groupId = incomingGroupCall ? incomingGroupCall.groupId : selectedGroup?._id;
-
-        if (!currentUser) return;
-
-        socketRef.current?.emit('end_call', {
-            toId: toId,
-            fromId: currentUser.id,
-            groupId: groupId
-        });
+        if (socketRef.current && currentUser) {
+            socketRef.current.emit('end_call', { 
+                toId: incomingCall?.callerId || selectedUser?._id, 
+                fromId: currentUser.id,
+                groupId: selectedGroup?._id || initialMeetingId
+            });
+        }
         setCallStatus('idle');
-        setIncomingCall(null);
-        setIncomingGroupCall(null);
-        setCallRemoteSocketId(null);
         setRemoteStreams([]);
         setCallParticipants([]);
-        setLocalStream(prev => {
-            if (prev) prev.getTracks().forEach(t => t.stop());
-            return null;
-        });
-        if (videoProducerRef.current) videoProducerRef.current.close();
-        if (audioProducerRef.current) audioProducerRef.current.close();
-        if (sendTransportRef.current) sendTransportRef.current.close();
-        if (recvTransportRef.current) recvTransportRef.current.close();
+        if (localStream) localStream.getTracks().forEach(t => t.stop());
+        setLocalStream(null);
+        if (msClientRef.current) msClientRef.current.close();
+        msClientRef.current = null;
+
+        recvTransportRef.current = null;
+        sendTransportRef.current = null;
         videoProducerRef.current = null;
         audioProducerRef.current = null;
-        sendTransportRef.current = null;
-        recvTransportRef.current = null;
-        if (msClientRef.current) {
-            msClientRef.current.close();
-            msClientRef.current = null;
+        creatingRecvTransportRef.current = null;
+        sfuReadyRef.current = false;
+
+        if (onLeave) onLeave();
+    };
+
+    const toggleMute = async () => {
+        const newState = !isMuted;
+        setIsMuted(newState);
+        if (!msClientRef.current || !sendTransportRef.current) return;
+        if (newState) {
+            if (audioProducerRef.current) {
+                await socketRef.current?.emit('close_producer', { producerId: audioProducerRef.current.id, roomId: msClientRef.current.roomId });
+                audioProducerRef.current.close();
+                audioProducerRef.current = null;
+                if (localStream) {
+                    const audioTracks = localStream.getAudioTracks();
+                    audioTracks.forEach(t => { t.stop(); localStream.removeTrack(t); });
+                    setLocalStream(new MediaStream(localStream.getTracks()));
+                }
+            }
+        } else {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            audioProducerRef.current = await msClientRef.current.produceAudio(sendTransportRef.current, stream);
+            if (localStream) {
+                const audioTracks = localStream.getAudioTracks();
+                audioTracks.forEach(t => { t.stop(); localStream.removeTrack(t); });
+                setLocalStream(new MediaStream([...localStream.getTracks(), stream.getAudioTracks()[0]]));
+            } else {
+                setLocalStream(stream);
+            }
         }
-        setIsMuted(true);
-        setIsVideoOff(true);
     };
 
-    // Effect to handle video toggle
-    useEffect(() => {
-        if (!msClientRef.current || !sendTransportRef.current || !localStream) return;
-
-        const syncVideo = async () => {
-            if (isVideoOff) {
-                if (videoProducerRef.current) {
-                    const producerId = videoProducerRef.current.id;
-                    await msClientRef.current?.closeProducer(producerId);
-                    videoProducerRef.current.close();
-                    videoProducerRef.current = null;
-                }
-                const track = localStream.getVideoTracks()[0];
-                if (track) {
-                    track.stop();
-                    localStream.removeTrack(track);
+    const toggleVideo = async () => {
+        const newState = !isVideoOff;
+        setIsVideoOff(newState);
+        if (!msClientRef.current || !sendTransportRef.current) return;
+        if (newState) {
+            if (videoProducerRef.current) {
+                await socketRef.current?.emit('close_producer', { producerId: videoProducerRef.current.id, roomId: msClientRef.current.roomId });
+                videoProducerRef.current.close();
+                videoProducerRef.current = null;
+                if (localStream) {
+                    const videoTracks = localStream.getVideoTracks();
+                    videoTracks.forEach(t => { t.stop(); localStream.removeTrack(t); });
                     setLocalStream(new MediaStream(localStream.getTracks()));
                 }
-            } else {
-                if (!videoProducerRef.current) {
-                    try {
-                        const vStream = await navigator.mediaDevices.getUserMedia({ video: true });
-                        const track = vStream.getVideoTracks()[0];
-                        localStream.addTrack(track);
-                        setLocalStream(new MediaStream(localStream.getTracks()));
-                        videoProducerRef.current = await msClientRef.current?.produceVideo(sendTransportRef.current, vStream);
-                    } catch (err) {
-                        console.error("Error starting video:", err);
-                        setIsVideoOff(true);
-                    }
-                }
             }
-        };
-
-        syncVideo();
-    }, [isVideoOff, localStream]);
-
-    // Effect to handle audio toggle
-    useEffect(() => {
-        if (!msClientRef.current || !sendTransportRef.current || !localStream) return;
-
-        const syncAudio = async () => {
-            if (isMuted) {
-                if (audioProducerRef.current) {
-                    const producerId = audioProducerRef.current.id;
-                    await msClientRef.current?.closeProducer(producerId);
-                    audioProducerRef.current.close();
-                    audioProducerRef.current = null;
-                }
-                const track = localStream.getAudioTracks()[0];
-                if (track) {
-                    track.stop();
-                    localStream.removeTrack(track);
-                    setLocalStream(new MediaStream(localStream.getTracks()));
-                }
+        } else {
+            const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+            videoProducerRef.current = await msClientRef.current.produceVideo(sendTransportRef.current, stream);
+            if (localStream) {
+                const videoTracks = localStream.getVideoTracks();
+                videoTracks.forEach(t => { t.stop(); localStream.removeTrack(t); });
+                setLocalStream(new MediaStream([...localStream.getTracks(), stream.getVideoTracks()[0]]));
             } else {
-                if (!audioProducerRef.current) {
-                    try {
-                        const aStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                        const track = aStream.getAudioTracks()[0];
-                        localStream.addTrack(track);
-                        setLocalStream(new MediaStream(localStream.getTracks()));
-                        audioProducerRef.current = await msClientRef.current?.produceAudio(sendTransportRef.current, aStream);
-                    } catch (err) {
-                        console.error("Error starting audio:", err);
-                        setIsMuted(true);
-                    }
-                }
+                setLocalStream(stream);
             }
+        }
+    };
+
+    const handleSendMessage = async (e: React.FormEvent) => {
+        e.preventDefault();
+        if (!newMessage.trim() || !currentUser || (!selectedUser && !selectedGroup)) return;
+        const msgData: any = {
+            sender: currentUser.id,
+            text: newMessage.trim(),
+            timestamp: new Date().toISOString()
         };
-
-        syncAudio();
-    }, [isMuted, localStream]);
-
-    const handleMuteParticipant = (socketId: string) => {
-        const roomId = selectedGroup?._id || incomingGroupCall?.groupId || incomingCall?.callerId || selectedUser?._id;
-        if (!roomId) return;
-        socketRef.current?.emit('mute_participant', { roomId, targetSocketId: socketId });
+        if (selectedUser) msgData.receiver = selectedUser._id;
+        else msgData.groupId = selectedGroup?._id;
+        try {
+            const res = await fetch(`${BACKEND_URL}/api/chat/send`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(msgData)
+            });
+            if (res.ok) {
+                const savedMsg = await res.json();
+                socketRef.current?.emit('send_message', savedMsg);
+                setMessages(prev => [...prev, savedMsg]);
+                setNewMessage('');
+            }
+        } catch (e) { console.error(e); }
     };
 
-    const handleMuteAll = () => {
-        const roomId = selectedGroup?._id || incomingGroupCall?.groupId || incomingCall?.callerId || selectedUser?._id;
-        if (!roomId) return;
-        socketRef.current?.emit('mute_all', { roomId });
+    const handleCallInitiate = () => {
+        if (selectedGroup) {
+            socketRef.current?.emit('initiate_group_call', {
+                callerId: currentUser?.id,
+                callerEmail: currentUser?.email,
+                groupId: selectedGroup._id,
+                groupName: selectedGroup.name
+            });
+            setCallStatus('connected');
+            startSfuSession(selectedGroup._id);
+        } else if (selectedUser) {
+            socketRef.current?.emit('initiate_call', {
+                callerId: currentUser?.id,
+                callerEmail: currentUser?.email,
+                receiverId: selectedUser._id
+            });
+            setCallStatus('ringing');
+            setCallRemoteEmail(selectedUser.email);
+        }
     };
 
-    const handleRequestPrivateAudio = (targetSocketId: string, targetEmail: string) => {
-        const roomId = selectedGroup?._id || incomingGroupCall?.groupId;
-        if (!roomId || !currentUser) return;
-        socketRef.current?.emit('request_private_audio', {
-            targetSocketId,
-            requesterEmail: currentUser.email,
-            roomId
-        });
-    };
-
-    const handleAcceptPrivateAudio = (requesterSocketId: string) => {
-        const roomId = selectedGroup?._id || incomingGroupCall?.groupId;
-        if (!roomId) return;
-        socketRef.current?.emit('accept_private_audio', { requesterSocketId, roomId });
-        setPendingPrivateRequest(null);
-    };
-
-    const handleDeclinePrivateAudio = (requesterSocketId: string) => {
-        socketRef.current?.emit('decline_private_audio', { requesterSocketId });
-        setPendingPrivateRequest(null);
-    };
-
-    const handleEndPrivateAudio = () => {
-        const roomId = msClientRef.current?.roomId || selectedGroup?._id || incomingGroupCall?.groupId;
-        if (!roomId) return;
-        socketRef.current?.emit('end_private_audio', { roomId });
-        // Local cleanup is handled by the 'private_audio_ended' listener but we can also trigger it
-    };
-
-    const filteredUsers = users.filter(u =>
-        u.email.toLowerCase().includes(searchQuery.toLowerCase()) &&
-        u._id !== currentUser?.id
-    );
+    if (mode === 'meeting' && callStatus === 'connected') {
+        return (
+            <div className="h-screen w-screen bg-zinc-950 flex flex-col">
+                <CallInterface
+                    meetingCode={initialMeetingId}
+                    status="connected"
+                    remoteUserEmail={callRemoteEmail}
+                    remoteStreams={remoteStreams}
+                    localStream={localStream}
+                    onAccept={() => {}}
+                    onDecline={handleEndCall}
+                    onEnd={handleEndCall}
+                    isMuted={isMuted}
+                    isVideoOff={isVideoOff}
+                    onToggleMute={toggleMute}
+                    onToggleVideo={toggleVideo}
+                    isHost={true}
+                    isGroupCall={true}
+                    onMuteParticipant={(id) => socketRef.current?.emit('mute_participant', { targetSocketId: id, roomId: initialMeetingId })}
+                    onMuteAll={() => socketRef.current?.emit('mute_all', { roomId: initialMeetingId })}
+                    participants={[
+                        ...(currentUser ? [{ socketId: socketRef.current?.id || 'me', email: currentUser.email }] : []),
+                        ...callParticipants.filter(p => p.socketId !== (socketRef.current?.id || 'me'))
+                    ]}
+                    hostSocketId=""
+                    mySocketId={socketRef.current?.id || ''}
+                    activePrivateSession={activePrivateSession}
+                    onRequestPrivateAudio={() => {}}
+                    onEndPrivateAudio={() => {}}
+                    pendingPrivateRequest={null}
+                    onAcceptPrivateAudio={() => {}}
+                    onDeclinePrivateAudio={() => {}}
+                    remotePrivateStream={null}
+                />
+            </div>
+        );
+    }
 
     return (
-        <div className="flex h-full w-full bg-card overflow-hidden">
-            {/* Group Creation Modal */}
-            {showCreateGroup && (
-                <div className="fixed inset-0 z-[100] bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
-                    <div className="bg-card border border-border p-6 rounded-2xl shadow-2xl w-full max-w-md">
-                        <h3 className="text-xl font-bold mb-4 text-foreground">Create New Group</h3>
-                        <div className="space-y-4">
-                            <div>
-                                <label className="text-sm font-medium text-muted-foreground block mb-1">Group Name</label>
-                                <input
-                                    type="text"
-                                    className="w-full bg-secondary/50 border border-border rounded-lg p-2 text-sm focus:outline-none focus:ring-2 focus:ring-rose-500/50"
-                                    placeholder="Enter group name..."
-                                    value={newGroupName}
-                                    onChange={(e) => setNewGroupName(e.target.value)}
-                                />
-                            </div>
-                            <div>
-                                <label className="text-sm font-medium text-muted-foreground block mb-2">Select Members</label>
-                                <div className="max-h-48 overflow-y-auto space-y-1 pr-2">
-                                    {users.filter(u => u._id !== currentUser?.id).map(user => (
-                                        <div
-                                            key={user._id}
-                                            onClick={() => toggleMemberSelection(user._id)}
-                                            className={`flex items-center gap-3 p-2 rounded-lg cursor-pointer transition-colors ${selectedMembers.includes(user._id) ? 'bg-rose-500/10 border border-rose-500/50' : 'hover:bg-secondary border border-transparent'}`}
-                                        >
-                                            <div className="w-8 h-8 rounded-full bg-rose-100 dark:bg-rose-950/40 flex items-center justify-center text-rose-600">
-                                                <UserIcon size={14} />
-                                            </div>
-                                            <p className="text-sm flex-1">{user.email}</p>
-                                            <div className={`w-4 h-4 rounded-full border ${selectedMembers.includes(user._id) ? 'bg-rose-600 border-rose-600' : 'border-muted-foreground'}`}>
-                                                {selectedMembers.includes(user._id) && (
-                                                    <div className="flex items-center justify-center text-white">
-                                                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><path d="M20 6L9 17l-5-5" /></svg>
-                                                    </div>
-                                                )}
-                                            </div>
-                                        </div>
-                                    ))}
-                                </div>
-                            </div>
-                            <div className="flex gap-3 pt-2">
-                                <button
-                                    onClick={() => setShowCreateGroup(false)}
-                                    className="flex-1 py-2 rounded-lg border border-border hover:bg-secondary transition-colors"
-                                >
-                                    Cancel
-                                </button>
-                                <button
-                                    onClick={handleCreateGroup}
-                                    className="flex-1 py-2 rounded-lg bg-rose-600 text-white hover:bg-rose-700 transition-colors font-medium"
-                                >
-                                    Create Group
-                                </button>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            )}
-
-            {/* Sidebar */}
-            <div className="w-80 border-r border-border flex flex-col bg-background/50">
-                <div className="p-4 border-b border-border space-y-4">
-                    <div className="flex bg-secondary/50 p-1 rounded-lg">
-                        <button
-                            onClick={() => setActiveTab('people')}
-                            className={`flex-1 py-1.5 text-xs font-medium rounded-md transition-all ${activeTab === 'people' ? 'bg-background shadow-sm text-rose-600' : 'text-muted-foreground hover:text-foreground'}`}
-                        >
-                            People
-                        </button>
-                        <button
-                            onClick={() => setActiveTab('groups')}
-                            className={`flex-1 py-1.5 text-xs font-medium rounded-md transition-all ${activeTab === 'groups' ? 'bg-background shadow-sm text-rose-600' : 'text-muted-foreground hover:text-foreground'}`}
-                        >
-                            Groups
-                        </button>
-                    </div>
-
-                    <div className="relative">
-                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" size={18} />
-                        <input
-                            type="text"
-                            placeholder={activeTab === 'people' ? "Search users..." : "Search groups..."}
-                            className="w-full bg-secondary/50 border border-border rounded-lg py-2 pl-10 pr-4 text-sm focus:outline-none focus:ring-2 focus:ring-rose-500/50 transition-all"
-                            value={searchQuery}
-                            onChange={(e) => setSearchQuery(e.target.value)}
-                        />
-                    </div>
-
-                    {activeTab === 'groups' && (
-                        <button
-                            onClick={() => setShowCreateGroup(true)}
-                            className="w-full py-2 bg-rose-600 text-white rounded-lg text-sm font-medium hover:bg-rose-700 transition-colors flex items-center justify-center gap-2"
-                        >
-                            <MessageSquare size={16} />
-                            Create New Group
-                        </button>
-                    )}
-                </div>
-
-                <div className="flex-1 overflow-y-auto">
-                    {activeTab === 'people' ? (
-                        filteredUsers.map(user => (
-                            <div
-                                key={user._id}
-                                onClick={() => {
-                                    setSelectedUser(user);
-                                    setSelectedGroup(null);
-                                }}
-                                className={`flex items-center gap-3 p-4 cursor-pointer transition-colors hover:bg-secondary/80 ${selectedUser?._id === user._id ? 'bg-secondary' : ''}`}
-                            >
-                                <div className="w-10 h-10 rounded-full bg-rose-100 dark:bg-rose-950/40 flex items-center justify-center text-rose-600">
-                                    <UserIcon size={20} />
-                                </div>
-                                <div className="flex-1 min-w-0">
-                                    <p className="font-medium text-foreground truncate">{user.email.split('@')[0]}</p>
-                                    <p className="text-xs text-muted-foreground truncate">{user.email}</p>
-                                </div>
-                            </div>
-                        ))
-                    ) : (
-                        groups.filter(g => g.name.toLowerCase().includes(searchQuery.toLowerCase())).map(group => (
-                            <div
-                                key={group._id}
-                                onClick={() => {
-                                    setSelectedGroup(group);
-                                    setSelectedUser(null);
-                                }}
-                                className={`flex items-center gap-3 p-4 cursor-pointer transition-colors hover:bg-secondary/80 ${selectedGroup?._id === group._id ? 'bg-secondary' : ''}`}
-                            >
-                                <div className="w-10 h-10 rounded-full bg-indigo-100 dark:bg-indigo-950/40 flex items-center justify-center text-indigo-600">
-                                    <MessageSquare size={20} />
-                                </div>
-                                <div className="flex-1 min-w-0">
-                                    <p className="font-medium text-foreground truncate">{group.name}</p>
-                                    <p className="text-xs text-muted-foreground truncate">{group.members.length} members</p>
-                                </div>
-                            </div>
-                        ))
-                    )}
-                </div>
-            </div>
-
-            {/* Chat Area */}
-            <div className="flex-1 flex flex-col">
-                {!currentUser && (
-                    <div className="absolute inset-0 z-50 bg-background/80 backdrop-blur-sm flex items-center justify-center p-4">
-                        <div className="bg-card border border-border p-6 rounded-xl shadow-lg max-w-sm text-center">
-                            <h3 className="text-lg font-bold mb-2">Authentication Required</h3>
-                            <p className="text-sm text-muted-foreground mb-4">Log back in again.</p>
-                            <button onClick={() => window.location.href = '/'} className="w-full py-2 bg-rose-600 text-white rounded-lg">Go to Login</button>
-                        </div>
-                    </div>
-                )}
-
-                {selectedUser || selectedGroup ? (
-                    <>
-                        <div className="p-4 border-b border-border flex items-center justify-between bg-background/30 px-6">
-                            <div className="flex items-center gap-3">
-                                <div className={`w-10 h-10 rounded-full flex items-center justify-center ${selectedUser ? 'bg-rose-100 dark:bg-rose-950/40 text-rose-600' : 'bg-indigo-100 dark:bg-indigo-950/40 text-indigo-600'}`}>
-                                    {selectedUser ? <UserIcon size={20} /> : <MessageSquare size={20} />}
-                                </div>
-                                <div className="flex-1">
-                                    <h3 className="font-bold text-foreground">{selectedUser ? selectedUser.email.split('@')[0] : selectedGroup?.name}</h3>
-                                    <p className="text-xs text-green-500">{selectedUser ? 'Online' : `${selectedGroup?.members.length} members`}</p>
-                                </div>
-                            </div>
-                            <div className="flex items-center gap-3">
-                                {selectedGroup && (
-                                    <button
-                                        onClick={() => setShowGroupDetails(true)}
-                                        className="p-2.5 rounded-full bg-secondary text-muted-foreground hover:text-foreground transition-colors"
-                                        title="Group Info"
-                                    >
-                                        <Info size={18} />
-                                    </button>
-                                )}
-                                <button onClick={handleInitiateCall} disabled={callStatus !== 'idle'} className="p-2.5 rounded-full bg-rose-600 text-white hover:bg-rose-700">
-                                    <Phone size={18} />
-                                </button>
-                            </div>
-                        </div>
-
-                        {/* Video Grid */}
-                        {remoteStreams.length > 0 && (
-                            <div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-4 bg-muted/30 border-b border-border">
-                                {remoteStreams.map((item) => (
-                                    <div key={item.socketId} className="relative aspect-video bg-black rounded-lg overflow-hidden shadow-xl border-2 border-rose-500/20">
-                                        <video
-                                            ref={(el) => { if (el) el.srcObject = item.stream; }}
-                                            autoPlay
-                                            playsInline
-                                            className="w-full h-full object-cover"
-                                        />
-                                        <div className="absolute bottom-2 left-2 px-2 py-1 bg-black/60 text-white text-[10px] rounded backdrop-blur-sm">
-                                            {item.email?.split('@')[0] || 'Remote User'}
-                                        </div>
-                                    </div>
-                                ))}
-                            </div>
-                        )}
-
-                        <div ref={scrollRef} className="flex-1 overflow-y-auto p-4 space-y-4 bg-background/10">
-                            {messages.map((msg) => {
-                                const senderId = typeof msg.sender === 'object' ? msg.sender._id : msg.sender;
-                                const senderEmail = typeof msg.sender === 'object' ? msg.sender.email : null;
-                                const isMe = senderId === currentUser?.id;
-
-                                return (
-                                    <div key={msg._id} className={`flex flex-col ${isMe ? 'items-end' : 'items-start'}`}>
-                                        {selectedGroup && !isMe && senderEmail && (
-                                            <span className="text-[10px] text-muted-foreground ml-2 mb-1">{senderEmail.split('@')[0]}</span>
-                                        )}
-                                        <div className={`max-w-[70%] p-3 rounded-2xl ${isMe ? 'bg-rose-600 text-white rounded-tr-none' : 'bg-secondary text-foreground rounded-tl-none border border-border'}`}>
-                                            <p className="text-sm">{msg.text}</p>
-                                        </div>
-                                    </div>
-                                );
-                            })}
-                        </div>
-
-                        <form onSubmit={handleSendMessage} className="p-4 border-t border-border bg-background/30">
-                            <div className="flex gap-2">
-                                <input
-                                    type="text"
-                                    placeholder="Type a message..."
-                                    className="flex-1 bg-secondary/50 border border-border rounded-lg px-4 py-2 text-sm focus:outline-none"
-                                    value={newMessage}
-                                    onChange={(e) => setNewMessage(e.target.value)}
-                                />
-                                <button type="submit" className="p-2 bg-rose-600 text-white rounded-lg"><Send size={20} /></button>
-                            </div>
-                        </form>
-                    </>
-                ) : (
-                    <div className="flex-1 flex flex-col items-center justify-center text-muted-foreground p-8">
-                        <div className="relative mb-6">
-                            <div className="absolute -inset-4 bg-rose-500/20 rounded-full blur-xl animate-pulse"></div>
-                            <MessageSquare size={64} className="text-rose-500 relative" />
-                        </div>
-                        <h3 className="text-2xl font-bold text-foreground mb-2">Welcome to Hertzworkz</h3>
-                        <p className="text-center max-w-xs">Select a contact or join a group to start collaborating in real-time.</p>
-                    </div>
-                )}
-            </div>
-
+        <div className="flex h-screen bg-white dark:bg-zinc-950 transition-colors font-sans overflow-hidden">
             {callStatus !== 'idle' && (
                 <CallInterface
-                    status={callStatus}
+                    meetingCode={initialMeetingId}
+                    status={callStatus as any}
                     remoteUserEmail={callRemoteEmail}
                     remoteStreams={remoteStreams}
                     localStream={localStream}
@@ -1111,100 +551,91 @@ export function Chat() {
                     onEnd={handleEndCall}
                     isMuted={isMuted}
                     isVideoOff={isVideoOff}
-                    onToggleMute={() => setIsMuted(!isMuted)}
-                    onToggleVideo={() => setIsVideoOff(!isVideoOff)}
-                    isHost={
-                        (!!selectedGroup && selectedGroup.createdBy === currentUser?.id) || 
-                        (!!incomingGroupCall && groups.find(g => g._id === incomingGroupCall.groupId)?.createdBy === currentUser?.id) ||
-                        (!!selectedUser && !incomingCall)
-                    }
-                    isGroupCall={!!selectedGroup || !!incomingGroupCall}
-                    onMuteParticipant={handleMuteParticipant}
-                    onMuteAll={handleMuteAll}
+                    onToggleMute={toggleMute}
+                    onToggleVideo={toggleVideo}
+                    isHost={true}
+                    isGroupCall={true}
+                    onMuteParticipant={(id) => socketRef.current?.emit('mute_participant', { targetSocketId: id, roomId: initialMeetingId })}
+                    onMuteAll={() => socketRef.current?.emit('mute_all', { roomId: initialMeetingId })}
                     participants={[
                         ...(currentUser ? [{ socketId: socketRef.current?.id || 'me', email: currentUser.email }] : []),
-                        // Filtering out 'me' from callParticipants just to be very safe
-                        ...callParticipants.filter(p => p.socketId !== (socketRef.current?.id || 'me')),
-                        ...(callRemoteSocketId && 
-                            !callParticipants.find(p => p.socketId === callRemoteSocketId) && 
-                            callRemoteSocketId !== (socketRef.current?.id || 'me')
-                            ? [{ socketId: callRemoteSocketId, email: callRemoteEmail }] 
-                            : [])
+                        ...callParticipants
                     ]}
-                    hostSocketId={
-                        // We need the socketId of the admin. This requires the admin to have joined correctly.
-                        // For now we'll match by email if possible or use the createdBy ID directly
-                        (selectedGroup ? users.find(u => u._id === selectedGroup.createdBy)?.email : null) || ''
-                    }
+                    hostSocketId=""
                     mySocketId={socketRef.current?.id || ''}
                     activePrivateSession={activePrivateSession}
-                    onRequestPrivateAudio={handleRequestPrivateAudio}
-                    onEndPrivateAudio={handleEndPrivateAudio}
-                    pendingPrivateRequest={pendingPrivateRequest}
-                    onAcceptPrivateAudio={handleAcceptPrivateAudio}
-                    onDeclinePrivateAudio={handleDeclinePrivateAudio}
-                    remotePrivateStream={remotePrivateStream}
+                    onRequestPrivateAudio={() => {}}
+                    onEndPrivateAudio={() => {}}
+                    pendingPrivateRequest={null}
+                    onAcceptPrivateAudio={() => {}}
+                    onDeclinePrivateAudio={() => {}}
+                    remotePrivateStream={null}
                 />
             )}
 
-            {/* Group Details Modal */}
-            {showGroupDetails && selectedGroup && (
-                <div className="fixed inset-0 z-[100] bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
-                    <div className="bg-card border border-border p-6 rounded-2xl shadow-2xl w-full max-w-md">
-                        <div className="flex justify-between items-center mb-6">
-                            <h3 className="text-xl font-bold text-foreground">Group Details</h3>
-                            <button onClick={() => setShowGroupDetails(false)} className="text-muted-foreground hover:text-foreground">
-                                <X size={20} />
-                            </button>
-                        </div>
-                        
-                        <div className="space-y-6">
-                            <div className="flex flex-col items-center gap-2">
-                                <div className="w-20 h-20 rounded-full bg-indigo-100 dark:bg-indigo-950/40 flex items-center justify-center text-indigo-600 mb-2">
-                                    <MessageSquare size={40} />
-                                </div>
-                                <h4 className="text-lg font-bold">{selectedGroup.name}</h4>
-                                <p className="text-sm text-muted-foreground">{selectedGroup.members.length} members</p>
-                            </div>
-
-                            <div>
-                                <h5 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider mb-3">Members</h5>
-                                <div className="space-y-3 max-h-60 overflow-y-auto pr-2">
-                                    {selectedGroup.members.map((member: any) => {
-                                        const memberId = typeof member === 'object' ? member._id : member;
-                                        const memberEmail = typeof member === 'object' ? member.email : 'Loading...';
-                                        const isAdmin = memberId === selectedGroup.createdBy;
-                                        
-                                        return (
-                                            <div key={memberId} className="flex items-center gap-3 p-2 rounded-lg bg-secondary/30 border border-border/50">
-                                                <div className="w-8 h-8 rounded-full bg-rose-100 dark:bg-rose-950/40 flex items-center justify-center text-rose-600">
-                                                    <UserIcon size={14} />
-                                                </div>
-                                                <div className="flex-1">
-                                                    <p className="text-sm font-medium">{memberEmail.split('@')[0]} {memberId === currentUser?.id ? '(You)' : ''}</p>
-                                                    <p className="text-[10px] text-muted-foreground">{memberEmail}</p>
-                                                </div>
-                                                {isAdmin && (
-                                                    <span className="px-2 py-0.5 bg-rose-500/10 text-rose-500 text-[10px] font-bold rounded-full border border-rose-500/20">
-                                                        ADMIN
-                                                    </span>
-                                                )}
-                                            </div>
-                                        );
-                                    })}
-                                </div>
-                            </div>
-
-                            <button
-                                onClick={() => setShowGroupDetails(false)}
-                                className="w-full py-2.5 rounded-xl bg-secondary hover:bg-secondary/80 text-foreground transition-all font-medium border border-border"
-                            >
-                                Close
-                            </button>
-                        </div>
-                    </div>
+            <div className="w-80 border-r border-border flex flex-col bg-background shrink-0">
+                <div className="p-4 border-b border-border flex items-center justify-between">
+                    <h2 className="text-xl font-bold text-foreground">Hertzworkz</h2>
+                    <button onClick={() => setShowCreateGroup(true)} className="p-2 border border-border rounded-lg hover:bg-secondary"><X size={18} /></button>
                 </div>
-            )}
+                <div className="flex border-b border-border">
+                    <button onClick={() => setActiveTab('people')} className={`flex-1 py-3 text-xs font-bold ${activeTab === 'people' ? 'text-rose-500 border-b-2 border-rose-500' : 'text-muted-foreground'}`}>PEOPLE</button>
+                    <button onClick={() => setActiveTab('groups')} className={`flex-1 py-3 text-xs font-bold ${activeTab === 'groups' ? 'text-rose-500 border-b-2 border-rose-500' : 'text-muted-foreground'}`}>GROUPS</button>
+                </div>
+                <div className="p-4 relative">
+                    <Search className="absolute left-7 top-1/2 -translate-y-1/2 text-muted-foreground" size={16} />
+                    <input type="text" placeholder="Search..." className="w-full bg-secondary border-none rounded-xl pl-10 pr-4 py-2.5 text-sm outline-none" value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} />
+                </div>
+                <div className="flex-1 overflow-y-auto px-2 space-y-1">
+                    {activeTab === 'people' ? users.filter(u => u._id !== currentUser?.id).map((u) => (
+                        <div key={u._id} onClick={() => { setSelectedUser(u); setSelectedGroup(null); }} className={`flex items-center gap-3 p-3 rounded-xl cursor-pointer transition-all ${selectedUser?._id === u._id ? 'bg-secondary' : 'hover:bg-secondary/50'}`}>
+                            <div className="w-10 h-10 rounded-full bg-rose-100 flex items-center justify-center text-rose-500 font-bold">{u.email[0].toUpperCase()}</div>
+                            <div className="flex-1 min-w-0"><p className="text-sm font-bold truncate text-foreground">{u.email.split('@')[0]}</p></div>
+                        </div>
+                    )) : groups.map(g => (
+                        <div key={g._id} onClick={() => { setSelectedGroup(g); setSelectedUser(null); }} className={`flex items-center gap-3 p-3 rounded-xl cursor-pointer transition-all ${selectedGroup?._id === g._id ? 'bg-secondary' : 'hover:bg-secondary/50'}`}>
+                            <div className="w-10 h-10 rounded-full bg-indigo-100 flex items-center justify-center text-indigo-500 font-bold">{g.name[0].toUpperCase()}</div>
+                            <div className="flex-1 min-w-0"><p className="text-sm font-bold truncate text-foreground">{g.name}</p></div>
+                        </div>
+                    ))}
+                </div>
+            </div>
+
+            <div className="flex-1 flex flex-col bg-background/50">
+                {(selectedUser || selectedGroup) ? (
+                    <>
+                        <header className="p-4 border-b border-border flex justify-between items-center bg-background/50">
+                            <div className="flex items-center gap-3">
+                                <div className="w-10 h-10 rounded-full bg-rose-500 flex items-center justify-center text-white font-bold">{(selectedUser?.email || selectedGroup?.name || '')[0].toUpperCase()}</div>
+                                <h3 className="font-bold text-foreground">{(selectedUser?.email || selectedGroup?.name || '').split('@')[0]}</h3>
+                            </div>
+                            <button onClick={handleCallInitiate} className="p-2.5 bg-rose-500 hover:bg-rose-600 text-white rounded-xl shadow-lg shadow-rose-500/20"><Phone size={20} /></button>
+                        </header>
+                        <div className="flex-1 overflow-y-auto p-4 space-y-4" ref={scrollRef}>
+                            {messages.map((m, i) => {
+                                const senderId = typeof m.sender === 'object' ? m.sender._id : m.sender;
+                                const isMe = senderId === currentUser?.id;
+                                return (
+                                    <div key={i} className={`flex ${isMe ? 'justify-end' : 'justify-start'}`}>
+                                        <div className={`max-w-[70%] p-3 rounded-2xl ${isMe ? 'bg-rose-500 text-white rounded-tr-none' : 'bg-secondary text-foreground rounded-tl-none'}`}>
+                                            <p className="text-sm">{m.text}</p>
+                                        </div>
+                                    </div>
+                                );
+                            })}
+                        </div>
+                        <form onSubmit={handleSendMessage} className="p-4 bg-background/50 border-t border-border flex gap-2">
+                            <input type="text" placeholder="Type a message..." className="flex-1 bg-secondary border-none rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-rose-500/20 transition-all" value={newMessage} onChange={(e) => setNewMessage(e.target.value)} />
+                            <button type="submit" className="p-3 bg-rose-500 text-white rounded-xl hover:bg-rose-700 transition-all shadow-lg shadow-rose-500/20"><Send size={20} /></button>
+                        </form>
+                    </>
+                ) : (
+                    <div className="flex-1 flex items-center justify-center text-muted-foreground p-8 text-center flex-col">
+                        <MessageSquare size={64} className="text-rose-500 mb-4 opacity-20" />
+                        <h3 className="text-2xl font-bold text-foreground">Select a contact to chat</h3>
+                    </div>
+                )}
+            </div>
         </div>
     );
 }

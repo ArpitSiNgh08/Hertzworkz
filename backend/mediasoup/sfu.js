@@ -2,31 +2,40 @@ const mediasoup = require('mediasoup');
 const config = require('../config/mediasoup');
 
 let worker;
+let workerInitializationPromise;
 const rooms = new Map(); // roomId => { router, transports, producers, consumers }
 
 const createWorker = async () => {
-    worker = await mediasoup.createWorker({
+    const newWorker = await mediasoup.createWorker({
         logLevel: config.mediasoup.worker.logLevel,
         logTags: config.mediasoup.worker.logTags,
         rtcMinPort: config.mediasoup.worker.rtcMinPort,
         rtcMaxPort: config.mediasoup.worker.rtcMaxPort,
     });
 
-    worker.on('died', () => {
+    newWorker.on('died', () => {
         console.error('mediasoup worker died, exiting in 2 seconds...');
         setTimeout(() => process.exit(1), 2000);
     });
 
     console.log('Mediasoup worker created');
-    return worker;
+    worker = newWorker;
+    return newWorker;
 };
 
-// Start worker
-createWorker();
+// Start worker and save promise
+workerInitializationPromise = createWorker();
 
 const creatingRouters = new Map(); // roomId => promise
 
 const getRouter = async (roomId) => {
+    // Ensure worker is initialized before creating any routers
+    let currentWorker = worker;
+    if (!currentWorker) {
+        currentWorker = await workerInitializationPromise;
+        worker = currentWorker;
+    }
+
     if (rooms.has(roomId)) {
         return rooms.get(roomId).router;
     }
@@ -36,7 +45,7 @@ const getRouter = async (roomId) => {
     }
 
     const promise = (async () => {
-        const router = await worker.createRouter({
+        const router = await currentWorker.createRouter({
             mediaCodecs: config.mediasoup.router.mediaCodecs,
         });
 
@@ -58,12 +67,13 @@ const getRouter = async (roomId) => {
     return router;
 };
 
-const createWebRtcTransport = async (roomId, socketId) => {
+const createWebRtcTransport = async (roomId, socketId, email) => {
     const router = await getRouter(roomId);
     const transport = await router.createWebRtcTransport(config.mediasoup.webRtcTransport);
 
-    // Store socketId in appData for easier cleanup
+    // Store socketId and email in appData for easier cleanup and identification
     transport.appData.socketId = socketId;
+    transport.appData.email = email;
 
     transport.on('dtlsstatechange', (dtlsState) => {
         if (dtlsState === 'closed') {
@@ -87,6 +97,7 @@ const createWebRtcTransport = async (roomId, socketId) => {
 };
 
 const closeTransportsBySocketId = (socketId) => {
+    let foundRoomId = null;
     for (const [roomId, room] of rooms) {
         for (const [transportId, transport] of room.transports) {
             if (transport.appData.socketId === socketId) {
@@ -101,13 +112,12 @@ const closeTransportsBySocketId = (socketId) => {
                     }
                 }
 
-
-                // Notify other clients in the room would happen in index.js
-                return roomId;
+                // Keep looping to ensure ALL matching transports (send/recv) are deleted
+                foundRoomId = roomId;
             }
         }
     }
-    return null;
+    return foundRoomId;
 };
 
 module.exports = {

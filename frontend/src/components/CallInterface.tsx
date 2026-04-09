@@ -7,6 +7,7 @@ import { Phone, PhoneOff, Video, VideoOff, Mic, MicOff, User, Users, Lock, X } f
 export type CallStatus = 'dialing' | 'ringing' | 'connected' | 'ended' | 'declined';
 
 interface CallInterfaceProps {
+    meetingCode?: string;
     status: CallStatus;
     remoteUserEmail: string;
     remoteStreams: { socketId: string, email: string, stream: MediaStream }[];
@@ -171,6 +172,7 @@ function RemoteVideo({ stream, socketId, email, hasVideo, isGroupCall, isHost, o
 }
 
 export function CallInterface({
+    meetingCode,
     status,
     remoteUserEmail,
     remoteStreams,
@@ -259,6 +261,22 @@ export function CallInterface({
     return createPortal((
         <div className="fixed inset-0 z-[200] bg-zinc-950 flex flex-col items-center justify-center overflow-hidden font-sans">
             <div className="absolute inset-0 bg-gradient-to-b from-rose-900/20 via-zinc-950 to-zinc-950" />
+
+            {meetingCode && status === 'connected' && (
+                <div className="absolute top-6 left-6 z-[250] flex items-center gap-3 px-4 py-2 bg-zinc-900/80 border border-white/10 rounded-xl backdrop-blur-md shadow-xl animate-in fade-in duration-500">
+                    <div className="flex flex-col">
+                        <span className="text-[10px] uppercase font-bold text-zinc-500 tracking-wider">Meeting Code</span>
+                        <span className="text-sm font-mono font-medium text-white">{meetingCode}</span>
+                    </div>
+                    <button 
+                        onClick={() => navigator.clipboard.writeText(meetingCode)}
+                        className="ml-2 p-1.5 hover:bg-white/10 rounded-lg text-zinc-400 hover:text-white transition-colors"
+                        title="Copy meeting code"
+                    >
+                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
+                    </button>
+                </div>
+            )}
 
             {pendingPrivateRequest && (
                 <div className="fixed top-6 left-1/2 -translate-x-1/2 z-[350] w-96 bg-zinc-900 border border-emerald-500/30 rounded-2xl shadow-2xl p-4 flex flex-col gap-4 animate-in slide-in-from-top duration-500">
