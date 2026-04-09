@@ -174,7 +174,12 @@ io.on('connection', (socket) => {
         
         // Clean up mediasoup resources for this user to prevent orphaned transports crashing future calls
         const { closeTransportsBySocketId } = require('./mediasoup/sfu');
-        closeTransportsBySocketId(socket.id);
+        const roomId = closeTransportsBySocketId(socket.id);
+
+        if (roomId) {
+            // Immediately notify everyone else in the room that this user has dropped
+            socket.to(roomId).emit('participant_left', { socketId: socket.id });
+        }
 
         if (data.groupId) {
             // For group calls, notifying others that someone left
