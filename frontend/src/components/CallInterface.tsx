@@ -141,7 +141,7 @@ function RemoteVideo({ stream, socketId, email, hasVideo, isGroupCall, isHost, o
                 ref={videoRef}
                 autoPlay
                 playsInline
-                className="w-full h-full object-cover"
+                className={`absolute inset-0 w-full h-full object-cover ${hasVideo ? 'block' : 'hidden'}`}
             />
             {!hasVideo && (
                 <div className="absolute inset-0 bg-zinc-900 flex flex-col items-center justify-center gap-4">
@@ -310,7 +310,7 @@ export function CallInterface({
 
             <div className="relative w-full h-full flex items-center justify-center p-4">
                 {status === 'connected' ? (
-                    <div className={`grid gap-4 w-full h-full max-w-7xl mx-auto transition-all duration-500 ${
+                    <div className={`grid gap-4 w-full h-full max-w-7xl mx-auto transition-all duration-500 auto-rows-fr ${
                         participants.filter(p => p.socketId !== mySocketId).length <= 1 ? 'grid-cols-1' :
                         participants.filter(p => p.socketId !== mySocketId).length === 2 ? 'grid-cols-1 md:grid-cols-2' :
                         participants.filter(p => p.socketId !== mySocketId).length <= 4 ? 'grid-cols-2' :
