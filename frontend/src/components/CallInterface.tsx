@@ -388,53 +388,54 @@ export function CallInterface({
                 )}
             </div>
 
-            <div className="absolute bottom-12 z-50 flex items-center gap-6 px-8 py-4 bg-zinc-900/40 backdrop-blur-2xl rounded-3xl border border-white/5 shadow-2xl animate-in slide-in-from-bottom-12 duration-700">
+            <div className="absolute bottom-6 md:bottom-12 z-50 flex flex-wrap justify-center items-center gap-3 md:gap-6 px-4 md:px-8 py-3 md:py-4 max-w-[calc(100vw-2rem)] bg-zinc-900/40 backdrop-blur-2xl rounded-3xl border border-white/5 shadow-2xl animate-in slide-in-from-bottom-12 duration-700">
                 {status === 'dialing' || status === 'connected' ? (
                     <>
                         <button
                             onClick={onToggleMute}
-                            className={`w-14 h-14 rounded-2xl flex items-center justify-center transition-all transform hover:scale-110 active:scale-95 ${isMuted ? 'bg-rose-500/20 text-rose-500 border border-rose-500/30' : 'bg-white/10 text-white border border-white/10 hover:bg-white/20'}`}
+                            className={`w-12 h-12 md:w-14 md:h-14 rounded-xl md:rounded-2xl shrink-0 flex items-center justify-center transition-all transform hover:scale-110 active:scale-95 ${isMuted ? 'bg-rose-500/20 text-rose-500 border border-rose-500/30' : 'bg-white/10 text-white border border-white/10 hover:bg-white/20'}`}
                         >
-                            {isMuted ? <MicOff size={24} /> : <Mic size={24} />}
+                            {isMuted ? <MicOff size={20} className="sm:w-6 sm:h-6" /> : <Mic size={20} className="sm:w-6 sm:h-6" />}
                         </button>
 
                         <button
                             onClick={onEnd}
-                            className="w-14 h-14 rounded-2xl bg-rose-500 hover:bg-rose-600 flex items-center justify-center text-white transition-all transform hover:scale-110 active:scale-95 shadow-xl shadow-rose-500/20"
+                            className="w-12 h-12 md:w-14 md:h-14 rounded-xl md:rounded-2xl shrink-0 bg-rose-500 hover:bg-rose-600 flex items-center justify-center text-white transition-all transform hover:scale-110 active:scale-95 shadow-xl shadow-rose-500/20"
                         >
-                            <PhoneOff size={24} />
+                            <PhoneOff size={20} className="sm:w-6 sm:h-6" />
                         </button>
 
                         <button
                             onClick={onToggleVideo}
-                            className={`w-14 h-14 rounded-2xl flex items-center justify-center transition-all transform hover:scale-110 active:scale-95 ${isVideoOff ? 'bg-rose-500/20 text-rose-500 border border-rose-500/30' : 'bg-white/10 text-white border border-white/10 hover:bg-white/20'}`}
+                            className={`w-12 h-12 md:w-14 md:h-14 rounded-xl md:rounded-2xl shrink-0 flex items-center justify-center transition-all transform hover:scale-110 active:scale-95 ${isVideoOff ? 'bg-rose-500/20 text-rose-500 border border-rose-500/30' : 'bg-white/10 text-white border border-white/10 hover:bg-white/20'}`}
                         >
-                            {isVideoOff ? <VideoOff size={24} /> : <Video size={24} />}
+                            {isVideoOff ? <VideoOff size={20} className="sm:w-6 sm:h-6" /> : <Video size={20} className="sm:w-6 sm:h-6" />}
                         </button>
 
                         {isGroupCall && isHost && status === 'connected' && (
-                            <div className="w-px h-8 bg-white/10 mx-2" />
+                            <div className="w-px h-6 md:h-8 bg-white/10 mx-1 md:mx-2 hidden sm:block" />
                         )}
 
                         {isGroupCall && isHost && status === 'connected' && (
                             <button
                                 onClick={onMuteAll}
-                                className="px-6 py-3 rounded-2xl bg-zinc-800 hover:bg-zinc-700 text-white font-semibold text-sm transition-all border border-white/10 flex items-center gap-2 hover:scale-105 active:scale-95"
+                                className="px-4 py-2.5 md:px-6 md:py-3 rounded-xl md:rounded-2xl bg-zinc-800 hover:bg-zinc-700 text-white font-semibold text-xs md:text-sm transition-all border border-white/10 flex items-center gap-2 hover:scale-105 active:scale-95 shrink-0"
                             >
-                                <MicOff size={18} className="text-rose-500" />
-                                Mute Everyone
+                                <MicOff size={16} className="sm:w-[18px] sm:h-[18px]" />
+                                <span className="hidden sm:inline">Mute Everyone</span>
+                                <span className="sm:hidden">Mute All</span>
                             </button>
                         )}
 
                         {isGroupCall && status === 'connected' && (
                             <>
-                                <div className="w-px h-8 bg-white/10 mx-2" />
+                                <div className="w-px h-6 md:h-8 bg-white/10 mx-1 md:mx-2 hidden sm:block" />
                                 <button
                                     onClick={() => setShowParticipants(prev => !prev)}
-                                    className={`w-14 h-14 rounded-2xl flex items-center justify-center transition-all transform hover:scale-110 active:scale-95 ${showParticipants ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' : 'bg-white/10 text-white border border-white/10 hover:bg-white/20'}`}
+                                    className={`w-12 h-12 md:w-14 md:h-14 rounded-xl md:rounded-2xl shrink-0 flex items-center justify-center transition-all transform hover:scale-110 active:scale-95 ${showParticipants ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' : 'bg-white/10 text-white border border-white/10 hover:bg-white/20'}`}
                                     title="Participants"
                                 >
-                                    <Users size={24} />
+                                    <Users size={20} className="sm:w-6 sm:h-6" />
                                 </button>
                             </>
                         )}
